@@ -3,6 +3,7 @@
 
   const STORAGE_KEY = 'lumen.tabs.v1';
   const THEME_KEY = 'lumen.theme.v1';
+  const SETTINGS_KEY = 'lumen.settings.v1';
   const MAX_TABS = 16;
   const FLOW_LIMIT = 100000;
   const FLOW_HIGH_WATER = 10;
@@ -95,6 +96,27 @@
   const stage = document.getElementById('terminal-stage');
   const addButton = document.getElementById('add-tab');
   const themeButton = document.getElementById('theme-toggle');
+  const settingsButton = document.getElementById('settings-toggle');
+  const settingsDialog = document.getElementById('settings-dialog');
+  const copySelectionSetting = document.getElementById('setting-copy-selection');
+  const closeBehaviorSetting = document.getElementById('setting-close-behavior');
+  const fontSizeSetting = document.getElementById('setting-font-size');
+  const fontSizeValue = document.getElementById('setting-font-size-value');
+  const cursorStyleSetting = document.getElementById('setting-cursor-style');
+  const cursorBlinkSetting = document.getElementById('setting-cursor-blink');
+  const lineHeightSetting = document.getElementById('setting-line-height');
+  const lineHeightValue = document.getElementById('setting-line-height-value');
+  const workingDirectorySetting = document.getElementById('setting-working-directory');
+  const protectRunningSetting = document.getElementById('setting-protect-running');
+  const shortcutSearchSetting = document.getElementById('setting-shortcut-search');
+  const shortcutNewTabSetting = document.getElementById('setting-shortcut-new-tab');
+  const openSessionManagerButton = document.getElementById('open-session-manager');
+  const exportTerminalButton = document.getElementById('export-terminal');
+  const terminalSearch = document.getElementById('terminal-search');
+  const terminalSearchInput = document.getElementById('terminal-search-input');
+  const terminalSearchStatus = document.getElementById('terminal-search-status');
+  const sessionManagerDialog = document.getElementById('session-manager-dialog');
+  const sessionManagerList = document.getElementById('session-manager-list');
   const toast = document.getElementById('toast');
   const toastMessage = document.getElementById('toast-message');
   const toastAction = document.getElementById('toast-action');
@@ -104,6 +126,8 @@
   const sessionDetach = document.getElementById('session-detach');
   const sessionTerminate = document.getElementById('session-terminate');
   const sessionCancel = document.getElementById('session-cancel');
+  const tabStrip = document.getElementById('tab-strip');
+  const contextMenu = document.getElementById('context-menu');
   const basePath = window.location.pathname.replace(/\/+$/, '');
   let activeId = null;
   let tokenPromise = null;
@@ -112,6 +136,9 @@
   let mobileCtrl = false;
   let pendingCloseId = null;
   let sessionActionPending = false;
+  let contextMenuRestoreFocus = null;
+  const defaultFontSize = window.matchMedia('(max-width: 560px)').matches ? 13 : 14;
+  let settings = loadSettings();
   const storedTheme = localStorage.getItem(THEME_KEY);
   const systemThemeQuery = window.matchMedia('(prefers-color-scheme: light)');
   let followsSystemTheme = storedTheme !== 'light' && storedTheme !== 'dark';
@@ -120,6 +147,102 @@
     : storedTheme === 'light'
       ? 'light'
       : 'dark';
+
+  function loadSettings() {
+    const defaults = {
+      copySelection: true,
+      closeBehavior: 'ask',
+      fontSize: defaultFontSize,
+      cursorStyle: 'bar',
+      cursorBlink: true,
+      lineHeight: 1.22,
+      workingDirectory: '/home/ubuntu',
+      protectRunning: true,
+      shortcuts: { search: 'Ctrl+Shift+F', newTab: 'Ctrl+Shift+T' },
+    };
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+      return {
+        copySelection: typeof saved?.copySelection === 'boolean'
+          ? saved.copySelection
+          : defaults.copySelection,
+        closeBehavior: ['ask', 'detach', 'terminate'].includes(saved?.closeBehavior)
+          ? saved.closeBehavior
+          : defaults.closeBehavior,
+        fontSize: Number.isInteger(saved?.fontSize) && saved.fontSize >= 11 && saved.fontSize <= 20
+          ? saved.fontSize
+          : defaults.fontSize,
+        cursorStyle: ['bar', 'block', 'underline'].includes(saved?.cursorStyle)
+          ? saved.cursorStyle : defaults.cursorStyle,
+        cursorBlink: typeof saved?.cursorBlink === 'boolean' ? saved.cursorBlink : defaults.cursorBlink,
+        lineHeight: Number(saved?.lineHeight) >= 1 && Number(saved?.lineHeight) <= 1.6
+          ? Number(saved.lineHeight) : defaults.lineHeight,
+        workingDirectory: typeof saved?.workingDirectory === 'string'
+          ? saved.workingDirectory.slice(0, 240) : defaults.workingDirectory,
+        protectRunning: typeof saved?.protectRunning === 'boolean'
+          ? saved.protectRunning : defaults.protectRunning,
+        shortcuts: {
+          search: saved?.shortcuts?.search || defaults.shortcuts.search,
+          newTab: saved?.shortcuts?.newTab || defaults.shortcuts.newTab,
+        },
+      };
+    } catch {
+      localStorage.removeItem(SETTINGS_KEY);
+      return defaults;
+    }
+  }
+
+  function saveSettings() {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  }
+
+  function setCustomSelect(control, value, notify = false) {
+    const option = control.querySelector(`[data-value="${CSS.escape(value)}"]`);
+    if (!option) return;
+    control.dataset.value = value;
+    control.querySelector('.custom-select-trigger span').textContent = option.textContent;
+    for (const candidate of control.querySelectorAll('[role="option"]')) {
+      const selected = candidate.dataset.value === value;
+      candidate.setAttribute('aria-selected', selected ? 'true' : 'false');
+    }
+    if (notify) control.dispatchEvent(new Event('change'));
+  }
+
+  function closeCustomSelect(control) {
+    const menu = control.querySelector('.custom-select-menu');
+    const trigger = control.querySelector('.custom-select-trigger');
+    menu.hidden = true;
+    trigger.setAttribute('aria-expanded', 'false');
+    control.classList.remove('is-open');
+  }
+
+  function installCustomSelect(control) {
+    const trigger = control.querySelector('.custom-select-trigger');
+    const menu = control.querySelector('.custom-select-menu');
+    trigger.addEventListener('click', () => {
+      const opening = menu.hidden;
+      for (const other of document.querySelectorAll('.custom-select.is-open')) closeCustomSelect(other);
+      if (opening) {
+        menu.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+        control.classList.add('is-open');
+        menu.querySelector('[aria-selected="true"]')?.focus();
+      }
+    });
+    menu.addEventListener('click', event => {
+      const option = event.target.closest('[data-value]');
+      if (!option) return;
+      setCustomSelect(control, option.dataset.value, true);
+      closeCustomSelect(control);
+      trigger.focus();
+    });
+    control.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        closeCustomSelect(control);
+        trigger.focus();
+      }
+    });
+  }
 
   function hideToast() {
     toast.classList.remove('is-visible', 'has-action');
@@ -136,6 +259,80 @@
     toast.classList.add('is-visible');
     clearTimeout(toastTimer);
     if (timeout > 0) toastTimer = setTimeout(hideToast, timeout);
+  }
+
+  const MENU_ICONS = {
+    activate: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+    rename: '<path d="m4 16-.5 4 4-.5L18 9l-3-3L4 16Zm9-8 3 3"/>',
+    copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+    paste: '<path d="M9 5h6M9 3h6v4H9z"/><path d="M7 5H5v16h14V5h-2"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
+    select: '<path d="M7 3H3v4M17 3h4v4M7 21H3v-4M17 21h4v-4"/><path d="M8 9h8M8 13h8M8 17h5"/>',
+    export: '<path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 19h14"/>',
+    clear: '<path d="m4 15 8-11 8 11-5 5H9l-5-5Z"/><path d="m8 14 5 5"/>',
+    add: '<path d="M12 5v14M5 12h14"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12h2M3 12h2M12 3v2m0 14v2M17 7l1.5-1.5M5.5 18.5 7 17m10 0 1.5 1.5M5.5 5.5 7 7"/>',
+    sessions: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+    close: '<path d="m7 7 10 10M17 7 7 17"/>',
+    terminate: '<path d="M12 3v9"/><path d="M6.3 5.8a8 8 0 1 0 11.4 0"/>',
+  };
+
+  function hideContextMenu(restoreFocus = false) {
+    if (contextMenu.hidden) return;
+    contextMenu.hidden = true;
+    contextMenu.replaceChildren();
+    if (restoreFocus) contextMenuRestoreFocus?.();
+    contextMenuRestoreFocus = null;
+  }
+
+  function showContextMenu(event, items, restoreFocus) {
+    event.preventDefault();
+    event.stopPropagation();
+    hideContextMenu();
+    contextMenuRestoreFocus = restoreFocus;
+
+    for (const item of items) {
+      if (item.separator) {
+        const separator = document.createElement('div');
+        separator.className = 'context-menu-separator';
+        separator.setAttribute('role', 'separator');
+        contextMenu.append(separator);
+        continue;
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('role', 'menuitem');
+      button.disabled = Boolean(item.disabled);
+      button.classList.toggle('danger', Boolean(item.danger));
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24');
+      icon.setAttribute('aria-hidden', 'true');
+      icon.innerHTML = MENU_ICONS[item.icon] || '';
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      const shortcut = document.createElement('kbd');
+      shortcut.textContent = item.shortcut || '';
+      button.append(icon, label, shortcut);
+      button.addEventListener('click', () => {
+        hideContextMenu();
+        item.action?.();
+      });
+      contextMenu.append(button);
+    }
+
+    contextMenu.hidden = false;
+    contextMenu.style.left = '0';
+    contextMenu.style.top = '0';
+    const rect = contextMenu.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.max(margin, Math.min(event.clientX, window.innerWidth - rect.width - margin));
+    const top = Math.max(margin, Math.min(event.clientY, window.innerHeight - rect.height - margin));
+    contextMenu.style.left = `${left}px`;
+    contextMenu.style.top = `${top}px`;
+    contextMenu.style.transformOrigin =
+      `${event.clientX < left + rect.width / 2 ? 'left' : 'right'} `
+      + `${event.clientY < top + rect.height / 2 ? 'top' : 'bottom'}`;
+    contextMenu.querySelector('button:not(:disabled)')?.focus();
   }
 
   function copyWithSelection(text) {
@@ -212,6 +409,7 @@
   }
 
   function copyTerminalSelection(session) {
+    if (!settings.copySelection) return;
     if (session.destroyed || !session.term.hasSelection()) return;
     const text = normalizeSelectionFromTerminal(session.term);
     if (text.length === 0) return;
@@ -332,20 +530,20 @@
     return {
       allowProposedApi: false,
       convertEol: false,
-      cursorBlink: true,
+      cursorBlink: settings.cursorBlink,
       cursorInactiveStyle: 'outline',
-      cursorStyle: 'bar',
+      cursorStyle: settings.cursorStyle,
       cursorWidth: 1,
       // Modern terminal apps use bold as typography. Mapping it to ANSI
       // bright colors changes semantic TUI palettes (notably Codex).
       drawBoldTextInBrightColors: false,
       fastScrollModifier: 'alt',
       fontFamily: '"SFMono-Regular", "SF Mono", "Cascadia Code", "JetBrains Mono", "Maple Mono NF CN", "Maple Mono NF", "Noto Sans Mono CJK SC", Menlo, Consolas, monospace',
-      fontSize: window.matchMedia('(max-width: 560px)').matches ? 13 : 14,
+      fontSize: settings.fontSize,
       fontWeight: '400',
       fontWeightBold: '600',
       letterSpacing: 0.1,
-      lineHeight: 1.22,
+      lineHeight: settings.lineHeight,
       macOptionClickForcesSelection: true,
       macOptionIsMeta: true,
       minimumContrastRatio: TERM_MINIMUM_CONTRAST[currentTheme],
@@ -587,6 +785,16 @@
         rows: session.term.rows,
       });
       socket.send(encoder.encode(init));
+      if (session.initialWorkingDirectory) {
+        const directory = session.initialWorkingDirectory;
+        session.initialWorkingDirectory = '';
+        const quoted = directory.replace(/'/g, `'\\''`);
+        setTimeout(() => {
+          if (!session.destroyed && session.socket === socket) {
+            sendInput(session, `cd -- '${quoted}'\r`);
+          }
+        }, 120);
+      }
       scheduleResize(session);
       if (session.id === activeId) session.term.focus();
     });
@@ -669,7 +877,12 @@
       if (!event.target.closest('.close-tab')) activateSession(session.id);
     });
     tab.addEventListener('dblclick', event => {
-      if (event.target.closest('.tab-name')) beginRename(session);
+      if (event.target.closest('.close-tab, .tab-name-input')) return;
+      event.preventDefault();
+      requestCloseSession(session.id);
+    });
+    tab.addEventListener('contextmenu', event => {
+      showContextMenu(event, tabContextItems(session), () => session.term.focus());
     });
     tab.addEventListener('keydown', event => {
       if (event.key === 'Enter' || event.key === ' ') {
@@ -684,7 +897,7 @@
     });
     close.addEventListener('click', event => {
       event.stopPropagation();
-      openSessionDialog(session.id);
+      requestCloseSession(session.id);
     });
 
     session.tab = tab;
@@ -749,6 +962,7 @@
       selectionDisposables: [],
       selectionRenderFrame: null,
       selectionPointerCleanup: null,
+      initialWorkingDirectory: activate ? settings.workingDirectory.trim() : '',
       destroyed: false,
       reconnectAttempts: 0,
       reconnectTimer: null,
@@ -795,6 +1009,12 @@
       event.preventDefault();
     };
     mount.addEventListener('copy', session.copyListener, true);
+    mount.addEventListener('contextmenu', event => {
+      // Shift + right-click remains an escape hatch for the browser's native menu.
+      if (event.shiftKey) return;
+      activateSession(session.id);
+      showContextMenu(event, terminalContextItems(session), () => session.term.focus());
+    }, true);
 
     try {
       const webglAddon = new WebglAddon.WebglAddon();
@@ -864,6 +1084,7 @@
   function activateSession(id) {
     const session = sessions.get(id);
     if (!session) return;
+    hideContextMenu();
     activeId = id;
 
     for (const candidate of sessions.values()) {
@@ -933,6 +1154,18 @@
     requestAnimationFrame(() => (sessions.size === 1 ? sessionTerminate : sessionDetach).focus());
   }
 
+  function requestCloseSession(id) {
+    if (settings.closeBehavior === 'terminate' && !settings.protectRunning) {
+      void terminateSession(id);
+      return;
+    }
+    if (settings.closeBehavior === 'detach') {
+      detachSession(id);
+      return;
+    }
+    openSessionDialog(id);
+  }
+
   function closeSessionDialog() {
     if (sessionActionPending) return;
     sessionDialog.close();
@@ -968,7 +1201,7 @@
         throw new Error(`terminate endpoint returned ${response.status}`);
       }
 
-      sessionDialog.close();
+      if (sessionDialog.open) sessionDialog.close();
       pendingCloseId = null;
       if (sessions.size > 1) {
         detachSession(id, '终端会话及其中程序已结束');
@@ -1029,12 +1262,301 @@
     }
   }
 
+  function applyFontSize(fontSize) {
+    settings.fontSize = fontSize;
+    fontSizeSetting.value = String(fontSize);
+    fontSizeValue.value = `${fontSize}px`;
+    for (const session of sessions.values()) {
+      session.term.options.fontSize = fontSize;
+      session.term.clearTextureAtlas?.();
+      scheduleResize(session);
+    }
+  }
+
+  function applyTerminalAppearance() {
+    lineHeightValue.value = settings.lineHeight.toFixed(2);
+    for (const session of sessions.values()) {
+      session.term.options.cursorStyle = settings.cursorStyle;
+      session.term.options.cursorBlink = settings.cursorBlink;
+      session.term.options.lineHeight = settings.lineHeight;
+      session.term.clearTextureAtlas?.();
+      scheduleResize(session);
+    }
+  }
+
+  function bufferText(term) {
+    const lines = [];
+    for (let row = 0; row < term.buffer.active.length; row += 1) {
+      const line = term.buffer.active.getLine(row);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && lines.length) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    return lines.join('\n').replace(/\n+$/, '');
+  }
+
+  function exportCurrentTerminal(targetSession = null) {
+    const session = targetSession || sessions.get(activeId);
+    if (!session) return;
+    const blob = new Blob([bufferText(session.term)], { type: 'text/plain;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `lumen-${session.id}-${new Date().toISOString().replace(/[:.]/g, '-')}.txt`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+    showToast('终端输出已导出');
+  }
+
+  async function pasteIntoSession(session) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        showToast('剪贴板中没有可粘贴的文字');
+        return;
+      }
+      session.term.paste(text);
+      session.term.focus();
+    } catch (error) {
+      console.warn('[lumen] clipboard read was denied', error);
+      showToast('浏览器不允许读取剪贴板，请使用 Ctrl+Shift+V', 4200);
+    }
+  }
+
+  function searchSelection(session) {
+    const text = normalizeSelectionFromTerminal(session.term).replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    activateSession(session.id);
+    terminalSearchInput.value = text.slice(0, 160);
+    openTerminalSearch();
+  }
+
+  function tabContextItems(session) {
+    return [
+      {
+        label: '切换到此标签',
+        icon: 'activate',
+        disabled: session.id === activeId,
+        action: () => activateSession(session.id),
+      },
+      { label: '重命名', icon: 'rename', action: () => beginRename(session) },
+      { label: '导出终端输出', icon: 'export', action: () => exportCurrentTerminal(session) },
+      { separator: true },
+      {
+        label: '仅关闭标签',
+        icon: 'close',
+        disabled: sessions.size === 1,
+        action: () => detachSession(session.id),
+      },
+      {
+        label: '终止会话',
+        icon: 'terminate',
+        danger: true,
+        action: () => openSessionDialog(session.id),
+      },
+    ];
+  }
+
+  function terminalContextItems(session) {
+    if (session.term.hasSelection()) {
+      return [
+        {
+          label: '复制',
+          icon: 'copy',
+          shortcut: navigator.platform.includes('Mac') ? '⌘C' : 'Ctrl+Shift+C',
+          action: () => {
+            const text = normalizeSelectionFromTerminal(session.term);
+            if (text) void writeSystemClipboard(text, true, true);
+          },
+        },
+        { label: '搜索选中文字', icon: 'search', action: () => searchSelection(session) },
+        { label: '清除选区', icon: 'clear', action: () => session.term.clearSelection() },
+        { separator: true },
+        { label: '全选', icon: 'select', action: () => session.term.selectAll() },
+        { label: '导出终端输出', icon: 'export', action: () => exportCurrentTerminal(session) },
+      ];
+    }
+    return [
+      {
+        label: '粘贴',
+        icon: 'paste',
+        shortcut: navigator.platform.includes('Mac') ? '⌘V' : 'Ctrl+Shift+V',
+        action: () => void pasteIntoSession(session),
+      },
+      { label: '全选', icon: 'select', action: () => session.term.selectAll() },
+      { label: '搜索', icon: 'search', shortcut: settings.shortcuts.search, action: openTerminalSearch },
+      { separator: true },
+      { label: '导出终端输出', icon: 'export', action: () => exportCurrentTerminal(session) },
+      {
+        label: '清屏',
+        icon: 'clear',
+        action: () => {
+          session.term.clear();
+          session.term.focus();
+        },
+      },
+    ];
+  }
+
+  function stripContextItems() {
+    return [
+      { label: '新建终端', icon: 'add', shortcut: settings.shortcuts.newTab, action: addSession },
+      {
+        label: '管理会话',
+        icon: 'sessions',
+        action: () => {
+          renderSessionManager();
+          sessionManagerDialog.showModal();
+        },
+      },
+      { label: '终端设置', icon: 'settings', action: openSettings },
+    ];
+  }
+
+  function findInTerminal(direction = 1) {
+    const session = sessions.get(activeId);
+    const query = terminalSearchInput.value;
+    if (!session || !query) {
+      terminalSearchStatus.textContent = '';
+      return;
+    }
+    const term = session.term;
+    const matches = [];
+    const needle = query.toLocaleLowerCase();
+    for (let row = 0; row < term.buffer.active.length; row += 1) {
+      const line = term.buffer.active.getLine(row);
+      if (!line) continue;
+      const text = line.translateToString(false);
+      let column = 0;
+      const comparable = text.toLocaleLowerCase();
+      while ((column = comparable.indexOf(needle, column)) >= 0) {
+        matches.push({ row, column });
+        column += Math.max(needle.length, 1);
+      }
+    }
+    if (!matches.length) {
+      terminalSearchStatus.textContent = '无结果';
+      return;
+    }
+    const current = Number(terminalSearch.dataset.matchIndex || (direction > 0 ? -1 : 0));
+    const next = (current + direction + matches.length) % matches.length;
+    terminalSearch.dataset.matchIndex = String(next);
+    const match = matches[next];
+    term.select(match.column, match.row, query.length);
+    term.scrollToLine(match.row);
+    terminalSearchStatus.textContent = `${next + 1}/${matches.length}`;
+  }
+
+  function openTerminalSearch() {
+    terminalSearch.hidden = false;
+    terminalSearch.dataset.matchIndex = '-1';
+    terminalSearchInput.focus();
+    terminalSearchInput.select();
+    findInTerminal(1);
+  }
+
+  function closeTerminalSearch() {
+    terminalSearch.hidden = true;
+    terminalSearchStatus.textContent = '';
+    sessions.get(activeId)?.term.focus();
+  }
+
+  function renderSessionManager() {
+    sessionManagerList.replaceChildren();
+    for (const session of sessions.values()) {
+      const row = document.createElement('div');
+      row.className = 'session-manager-row';
+      const copy = document.createElement('span');
+      const state = session.state === 'online' ? '已连接' : session.state === 'connecting' ? '连接中' : '离线';
+      copy.innerHTML = `<strong></strong><small></small>`;
+      copy.querySelector('strong').textContent = session.name;
+      copy.querySelector('small').textContent =
+        `${session.id} · ${state}${session.lastLatency == null ? '' : ` · ${Math.round(session.lastLatency)} ms`}`;
+      const activate = document.createElement('button');
+      activate.type = 'button';
+      activate.textContent = '切换';
+      activate.addEventListener('click', () => {
+        sessionManagerDialog.close();
+        settingsDialog.close();
+        activateSession(session.id);
+      });
+      const terminate = document.createElement('button');
+      terminate.type = 'button';
+      terminate.className = 'danger';
+      terminate.textContent = '结束';
+      terminate.addEventListener('click', () => {
+        sessionManagerDialog.close();
+        settingsDialog.close();
+        openSessionDialog(session.id);
+      });
+      const actions = document.createElement('span');
+      actions.className = 'session-manager-actions';
+      actions.append(activate, terminate);
+      row.append(copy, actions);
+      sessionManagerList.append(row);
+    }
+  }
+
+  function shortcutFromEvent(event) {
+    if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) return '';
+    const parts = [];
+    if (event.ctrlKey) parts.push('Ctrl');
+    if (event.altKey) parts.push('Alt');
+    if (event.shiftKey) parts.push('Shift');
+    if (event.metaKey) parts.push('Meta');
+    parts.push(event.code.replace(/^Key/, '').replace(/^Digit/, ''));
+    return parts.join('+');
+  }
+
+  function shortcutMatches(event, shortcut) {
+    const pressed = shortcutFromEvent(event).toLowerCase();
+    return pressed && pressed === shortcut.toLowerCase();
+  }
+
+  function captureShortcut(input, name) {
+    input.addEventListener('keydown', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const shortcut = shortcutFromEvent(event);
+      if (!shortcut || !/[+]/.test(shortcut)) return;
+      settings.shortcuts[name] = shortcut;
+      input.value = shortcut;
+      saveSettings();
+    });
+  }
+
+  function syncSettingsControls() {
+    copySelectionSetting.checked = settings.copySelection;
+    setCustomSelect(closeBehaviorSetting, settings.closeBehavior);
+    applyFontSize(settings.fontSize);
+    setCustomSelect(cursorStyleSetting, settings.cursorStyle);
+    cursorBlinkSetting.checked = settings.cursorBlink;
+    lineHeightSetting.value = String(settings.lineHeight);
+    lineHeightValue.value = settings.lineHeight.toFixed(2);
+    workingDirectorySetting.value = settings.workingDirectory;
+    protectRunningSetting.checked = settings.protectRunning;
+    shortcutSearchSetting.value = settings.shortcuts.search;
+    shortcutNewTabSetting.value = settings.shortcuts.newTab;
+  }
+
+  function openSettings() {
+    hideContextMenu();
+    syncSettingsControls();
+    settingsDialog.showModal();
+    requestAnimationFrame(() => copySelectionSetting.focus());
+  }
+
   function setMobileCtrl(active) {
     mobileCtrl = active;
     mobileKeys.querySelector('[data-modifier="ctrl"]')?.classList.toggle('is-active', active);
   }
 
   addButton.addEventListener('click', addSession);
+  tabStrip.addEventListener('contextmenu', event => {
+    if (event.target.closest('.terminal-tab')) return;
+    showContextMenu(event, stripContextItems(), () => sessions.get(activeId)?.term.focus());
+  });
+  settingsButton.addEventListener('click', openSettings);
   themeButton.addEventListener('click', () => {
     followsSystemTheme = false;
     applyTheme(currentTheme === 'dark' ? 'light' : 'dark', true, true);
@@ -1064,6 +1586,78 @@
   sessionDialog.addEventListener('click', event => {
     if (event.target === sessionDialog) closeSessionDialog();
   });
+  settingsDialog.addEventListener('click', event => {
+    if (event.target === settingsDialog) settingsDialog.close();
+  });
+  settingsDialog.addEventListener('close', () => {
+    for (const control of document.querySelectorAll('.custom-select.is-open')) closeCustomSelect(control);
+    sessions.get(activeId)?.term.focus();
+  });
+  copySelectionSetting.addEventListener('change', () => {
+    settings.copySelection = copySelectionSetting.checked;
+    saveSettings();
+  });
+  closeBehaviorSetting.addEventListener('change', () => {
+    settings.closeBehavior = closeBehaviorSetting.dataset.value;
+    saveSettings();
+  });
+  fontSizeSetting.addEventListener('input', () => {
+    applyFontSize(Number(fontSizeSetting.value));
+    saveSettings();
+  });
+  cursorStyleSetting.addEventListener('change', () => {
+    settings.cursorStyle = cursorStyleSetting.dataset.value;
+    applyTerminalAppearance();
+    saveSettings();
+  });
+  cursorBlinkSetting.addEventListener('change', () => {
+    settings.cursorBlink = cursorBlinkSetting.checked;
+    applyTerminalAppearance();
+    saveSettings();
+  });
+  lineHeightSetting.addEventListener('input', () => {
+    settings.lineHeight = Number(lineHeightSetting.value);
+    applyTerminalAppearance();
+    saveSettings();
+  });
+  workingDirectorySetting.addEventListener('change', () => {
+    settings.workingDirectory = workingDirectorySetting.value.trim().slice(0, 240);
+    saveSettings();
+  });
+  protectRunningSetting.addEventListener('change', () => {
+    settings.protectRunning = protectRunningSetting.checked;
+    saveSettings();
+  });
+  captureShortcut(shortcutSearchSetting, 'search');
+  captureShortcut(shortcutNewTabSetting, 'newTab');
+  installCustomSelect(closeBehaviorSetting);
+  installCustomSelect(cursorStyleSetting);
+  exportTerminalButton.addEventListener('click', exportCurrentTerminal);
+  openSessionManagerButton.addEventListener('click', () => {
+    renderSessionManager();
+    settingsDialog.close();
+    requestAnimationFrame(() => sessionManagerDialog.showModal());
+  });
+  document.getElementById('session-manager-close')
+    .addEventListener('click', () => sessionManagerDialog.close());
+  terminalSearchInput.addEventListener('input', () => {
+    terminalSearch.dataset.matchIndex = '-1';
+    findInTerminal(1);
+  });
+  terminalSearchInput.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      findInTerminal(event.shiftKey ? -1 : 1);
+    } else if (event.key === 'Escape') {
+      closeTerminalSearch();
+    }
+  });
+  document.getElementById('terminal-search-previous')
+    .addEventListener('click', () => findInTerminal(-1));
+  document.getElementById('terminal-search-next')
+    .addEventListener('click', () => findInTerminal(1));
+  document.getElementById('terminal-search-close')
+    .addEventListener('click', closeTerminalSearch);
   document.querySelector('.brand').addEventListener('click', event => {
     event.preventDefault();
     sessions.get(activeId)?.term.focus();
@@ -1092,7 +1686,33 @@
   resizeObserver.observe(stage);
 
   window.addEventListener('keydown', event => {
-    const newTabShortcut = (event.ctrlKey && event.shiftKey && event.code === 'KeyT')
+    if (!contextMenu.hidden) {
+      const buttons = [...contextMenu.querySelectorAll('button:not(:disabled)')];
+      const index = buttons.indexOf(document.activeElement);
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        hideContextMenu(true);
+        return;
+      }
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+        const next = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? buttons.length - 1
+            : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+        return;
+      }
+    }
+    if (shortcutMatches(event, settings.shortcuts.search)) {
+      event.preventDefault();
+      openTerminalSearch();
+      return;
+    }
+    const newTabShortcut = shortcutMatches(event, settings.shortcuts.newTab)
       || (event.metaKey && !event.shiftKey && event.code === 'KeyT');
     if (newTabShortcut) {
       event.preventDefault();
@@ -1100,7 +1720,7 @@
     }
     if (event.metaKey && !event.shiftKey && event.code === 'KeyW') {
       event.preventDefault();
-      if (activeId) openSessionDialog(activeId);
+      if (activeId) requestCloseSession(activeId);
     }
     if (event.metaKey && !event.shiftKey && /^Digit[1-9]$/.test(event.code)) {
       const index = Number(event.code.slice(-1)) - 1;
@@ -1127,6 +1747,12 @@
       activateSession(ordered[index]);
     }
   }, true);
+
+  document.addEventListener('pointerdown', event => {
+    if (!contextMenu.hidden && !contextMenu.contains(event.target)) hideContextMenu();
+  }, true);
+  window.addEventListener('blur', () => hideContextMenu());
+  window.addEventListener('resize', () => hideContextMenu());
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {

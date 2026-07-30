@@ -34,18 +34,26 @@
         <span class="brand-name">lumen</span>
       </a>
 
-      <nav id="tab-list" class="tab-list" role="tablist" aria-label="终端标签"></nav>
+      <div id="tab-strip" class="tab-strip">
+        <nav id="tab-list" class="tab-list" role="tablist" aria-label="终端标签"></nav>
+        <button id="add-tab" class="add-button" type="button"
+                title="新建终端（⌘T / Ctrl+Shift+T）" aria-label="新建终端">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
 
       <div class="chrome-actions">
+        <button id="settings-toggle" class="icon-button" type="button" title="终端设置" aria-label="打开终端设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.37a1.7 1.7 0 0 0-1 .63 1.7 1.7 0 0 0-.37 1.08V21h-4v-.08A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.23 15a1.7 1.7 0 0 0-.63-1A1.7 1.7 0 0 0 2.52 13H2V9h.52A1.7 1.7 0 0 0 4 8a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 8.37 3a1.7 1.7 0 0 0 1-.63A1.7 1.7 0 0 0 9.74 1.3V1h4v.3A1.7 1.7 0 0 0 15 3a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 7a1.7 1.7 0 0 0 .63 1c.3.25.68.4 1.08.4H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/>
+          </svg>
+        </button>
         <button id="theme-toggle" class="icon-button" type="button" title="切换到浅色主题" aria-label="切换到浅色主题">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path class="theme-icon-sun" d="M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/>
             <path class="theme-icon-moon" d="M20 15.2A8.4 8.4 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z"/>
           </svg>
-        </button>
-        <button id="add-tab" class="add-button" type="button" title="新建终端（⌘T / Ctrl+Shift+T）" aria-label="新建终端">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          <span>新建</span>
         </button>
       </div>
     </header>
@@ -88,10 +96,161 @@
     </div>
   </dialog>
 
+  <dialog id="settings-dialog" class="session-dialog settings-dialog" aria-labelledby="settings-dialog-title">
+    <form method="dialog" class="session-dialog-card">
+      <div class="settings-heading">
+        <div>
+          <h2 id="settings-dialog-title">终端设置</h2>
+          <p>设置只保存在当前浏览器中。</p>
+        </div>
+        <button class="settings-close" type="submit" value="close" aria-label="关闭设置">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>
+        </button>
+      </div>
+
+      <div class="settings-list">
+        <label class="settings-row settings-toggle-row">
+          <span>
+            <strong>选中复制</strong>
+            <small>鼠标选取终端文字后自动复制到系统剪贴板</small>
+          </span>
+          <input id="setting-copy-selection" type="checkbox">
+          <i class="switch" aria-hidden="true"></i>
+        </label>
+
+        <div class="settings-row">
+          <span>
+            <strong>关闭默认行为</strong>
+            <small>点击标签关闭按钮时如何处理后台任务</small>
+          </span>
+          <div id="setting-close-behavior" class="custom-select" data-value="ask">
+            <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span>每次询问</span>
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+            </button>
+            <div class="custom-select-menu" role="listbox" hidden>
+              <button type="button" role="option" data-value="ask">每次询问</button>
+              <button type="button" role="option" data-value="detach">仅关闭标签</button>
+              <button type="button" role="option" data-value="terminate">终止会话</button>
+            </div>
+          </div>
+        </div>
+
+        <label class="settings-row settings-font-row">
+          <span>
+            <strong>终端字号</strong>
+            <small>即时调整所有标签的文字和终端布局</small>
+          </span>
+          <span class="font-size-control">
+            <input id="setting-font-size" type="range" min="11" max="20" step="1">
+            <output id="setting-font-size-value" for="setting-font-size"></output>
+          </span>
+        </label>
+
+        <div class="settings-row">
+          <span>
+            <strong>光标样式</strong>
+            <small>调整终端插入光标的形状</small>
+          </span>
+          <div id="setting-cursor-style" class="custom-select" data-value="bar">
+            <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+              <span>竖线</span>
+              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+            </button>
+            <div class="custom-select-menu" role="listbox" hidden>
+              <button type="button" role="option" data-value="bar">竖线</button>
+              <button type="button" role="option" data-value="block">方块</button>
+              <button type="button" role="option" data-value="underline">下划线</button>
+            </div>
+          </div>
+        </div>
+
+        <label class="settings-row settings-toggle-row">
+          <span>
+            <strong>光标闪烁</strong>
+            <small>让活动终端的光标保持闪烁</small>
+          </span>
+          <input id="setting-cursor-blink" type="checkbox">
+          <i class="switch" aria-hidden="true"></i>
+        </label>
+
+        <label class="settings-row settings-font-row">
+          <span>
+            <strong>行高</strong>
+            <small>调整终端文字的垂直间距</small>
+          </span>
+          <span class="font-size-control">
+            <input id="setting-line-height" type="range" min="1" max="1.6" step="0.05">
+            <output id="setting-line-height-value" for="setting-line-height"></output>
+          </span>
+        </label>
+
+        <label class="settings-row">
+          <span>
+            <strong>新标签工作目录</strong>
+            <small>新建会话连接后自动切换到此目录</small>
+          </span>
+          <input id="setting-working-directory" class="settings-text-input" type="text" maxlength="240"
+                 placeholder="/home/ubuntu">
+        </label>
+
+        <label class="settings-row settings-toggle-row">
+          <span>
+            <strong>终止前确认</strong>
+            <small>默认终止会话时仍先确认，防止误杀运行中的任务</small>
+          </span>
+          <input id="setting-protect-running" type="checkbox">
+          <i class="switch" aria-hidden="true"></i>
+        </label>
+
+        <div class="settings-row settings-shortcuts">
+          <span>
+            <strong>快捷键</strong>
+            <small>点击输入框后按下新的组合键</small>
+          </span>
+          <span class="shortcut-fields">
+            <label>搜索 <input id="setting-shortcut-search" type="text" readonly></label>
+            <label>新建 <input id="setting-shortcut-new-tab" type="text" readonly></label>
+          </span>
+        </div>
+      </div>
+
+      <div class="settings-tools">
+        <button id="open-session-manager" type="button">管理会话</button>
+        <button id="export-terminal" type="button">导出当前输出</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="terminal-search" class="terminal-search" hidden>
+    <input id="terminal-search-input" type="search" placeholder="搜索当前终端…" autocomplete="off">
+    <span id="terminal-search-status"></span>
+    <button id="terminal-search-previous" type="button" title="上一个">↑</button>
+    <button id="terminal-search-next" type="button" title="下一个">↓</button>
+    <button id="terminal-search-close" type="button" title="关闭">×</button>
+  </div>
+
+  <dialog id="session-manager-dialog" class="session-dialog settings-dialog" aria-labelledby="session-manager-title">
+    <div class="session-dialog-card">
+      <div class="settings-heading">
+        <div>
+          <h2 id="session-manager-title">会话管理</h2>
+          <p>查看当前浏览器中的终端会话、连接状态和延迟。</p>
+        </div>
+        <button id="session-manager-close" class="settings-close" type="button" aria-label="关闭会话管理">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>
+        </button>
+      </div>
+      <div id="session-manager-list" class="session-manager-list"></div>
+    </div>
+  </dialog>
+
   <div id="toast" class="toast" role="status" aria-live="polite">
     <span id="toast-message"></span>
     <button id="toast-action" type="button" hidden></button>
   </div>
+
+  <div id="context-menu" class="context-menu" role="menu" hidden></div>
 
   <script>/*__XTERM_JS__*/</script>
   <script>/*__FIT_JS__*/</script>
