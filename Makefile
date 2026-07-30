@@ -12,6 +12,7 @@ frontend:
 backend:
 	cmake -S vendor/ttyd -B build/ttyd -DCMAKE_BUILD_TYPE=Release
 	cmake --build build/ttyd --parallel
+	mkdir -p bin
 	install -m 0755 build/ttyd/ttyd bin/lumen-ttyd
 
 supervisor: src/lumen-pty.c
