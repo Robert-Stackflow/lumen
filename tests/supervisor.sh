@@ -52,8 +52,18 @@ LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list |
   >"$replay_output" || true
 
 grep -q 'LUMEN-PERSISTED' "$replay_output"
-if LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list |
-  grep -q '^test '; then
+session_removed="false"
+for _ in {1..150}; do
+  session_list="$(
+    LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list
+  )"
+  if ! grep -q '^test ' <<<"$session_list"; then
+    session_removed="true"
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$session_removed" != "true" ]]; then
   echo "Session survived an explicit shell exit." >&2
   exit 1
 fi
