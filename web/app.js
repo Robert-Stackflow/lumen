@@ -1790,7 +1790,7 @@
   }
 
   function exportCurrentTerminal(targetSession = null) {
-    const session = targetSession || sessions.get(activeId);
+    const session = targetSession?.term ? targetSession : sessions.get(activeId);
     if (!session) return;
     const blob = new Blob([bufferText(session.term)], { type: 'text/plain;charset=utf-8' });
     const link = document.createElement('a');
@@ -2739,7 +2739,7 @@
     sessionSort = value;
     renderSessionManager();
   });
-  exportTerminalButton.addEventListener('click', exportCurrentTerminal);
+  exportTerminalButton.addEventListener('click', () => exportCurrentTerminal());
   logoutSessionButton.addEventListener('click', async () => {
     logoutSessionButton.disabled = true;
     logoutSessionButton.textContent = '正在退出…';

@@ -43,6 +43,12 @@
       </div>
 
       <div class="chrome-actions">
+        <button id="export-terminal" class="icon-button" type="button"
+                title="导出当前终端输出" aria-label="导出当前终端输出">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v12m-4-4 4 4 4-4M5 20h14"/>
+          </svg>
+        </button>
         <button id="focus-toggle" class="icon-button" type="button" title="页面全屏" aria-label="进入页面全屏">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
@@ -144,9 +150,6 @@
                 <input id="setting-inherit-working-directory" type="checkbox">
                 <i class="switch" aria-hidden="true"></i>
               </label>
-            </div>
-            <div class="settings-tools">
-              <button id="export-terminal" type="button">导出当前输出</button>
             </div>
           </section>
 
