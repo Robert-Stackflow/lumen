@@ -9,6 +9,10 @@
   const FLOW_LOW_WATER = 4;
   const MAX_CLIPBOARD_BYTES = 1024 * 1024;
   const MAX_CLIPBOARD_BASE64 = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4;
+  const {
+    computeTerminalSelectionRanges,
+    normalizeSelectionFromTerminal,
+  } = globalThis.LumenSelection;
   const TERM_MINIMUM_CONTRAST = {
     dark: 1,
     light: 4.5,
@@ -32,8 +36,7 @@
       foreground: '#cdd6f4',
       cursor: '#f5e0dc',
       cursorAccent: '#10111a',
-      selectionBackground: '#3b3d55',
-      selectionForeground: '#cdd6f4',
+      selectionBackground: 'rgba(0, 0, 0, 0)',
       black: '#45475a',
       red: '#f38ba8',
       green: '#a6e3a1',
@@ -56,8 +59,7 @@
       foreground: '#4c4f69',
       cursor: '#dc8a78',
       cursorAccent: '#eff1f5',
-      selectionBackground: '#acb0be',
-      selectionForeground: '#4c4f69',
+      selectionBackground: 'rgba(0, 0, 0, 0)',
       black: '#5c5f77',
       red: '#d20f39',
       green: '#40a02b',
@@ -175,14 +177,84 @@
     });
   }
 
-  function normalizeTerminalSelection(text) {
-    // xterm already joins visually wrapped rows. Removing only whitespace at
-    // actual line boundaries keeps copied commands paste-ready without the
-    // rectangular padding commonly introduced by terminal multiplexers.
-    return text
-      .split('\n')
-      .map(line => line.replace(/[ \t]+(?=\r?$)/, ''))
-      .join('\n');
+  function renderSelectionOverlay(session) {
+    const { term, selectionLayer } = session;
+    if (!term || !selectionLayer) return;
+
+    if (!term.hasSelection()) {
+      selectionLayer.replaceChildren();
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const viewportY = term.buffer.active.viewportY;
+    for (const range of computeTerminalSelectionRanges(term)) {
+      const viewportRow = range.row - viewportY;
+      if (viewportRow < 0 || viewportRow >= term.rows) continue;
+
+      const segment = document.createElement('span');
+      segment.className = 'terminal-selection-segment';
+      segment.style.left = `${(range.start / term.cols) * 100}%`;
+      segment.style.width = `${((range.end - range.start) / term.cols) * 100}%`;
+      segment.style.top = `${(viewportRow / term.rows) * 100}%`;
+      segment.style.height = `${100 / term.rows}%`;
+      fragment.append(segment);
+    }
+    selectionLayer.replaceChildren(fragment);
+  }
+
+  function scheduleSelectionOverlay(session) {
+    if (session.selectionRenderFrame !== null) return;
+    session.selectionRenderFrame = requestAnimationFrame(() => {
+      session.selectionRenderFrame = null;
+      renderSelectionOverlay(session);
+    });
+  }
+
+  function installSelectionOverlay(session) {
+    const screen = session.term.element?.querySelector('.xterm-screen');
+    if (!screen) throw new Error('xterm screen was not created');
+
+    const layer = document.createElement('div');
+    layer.className = 'terminal-selection-layer';
+    layer.setAttribute('aria-hidden', 'true');
+    screen.append(layer);
+    session.selectionLayer = layer;
+    session.selectionDisposables.push(
+      session.term.onSelectionChange(() => scheduleSelectionOverlay(session)),
+      session.term.onScroll(() => scheduleSelectionOverlay(session)),
+      session.term.onRender(() => scheduleSelectionOverlay(session)),
+    );
+
+    let pointerSelecting = false;
+    const beginPointerSelection = event => {
+      if (event.button !== 0) return;
+      pointerSelecting = true;
+      scheduleSelectionOverlay(session);
+    };
+    const updatePointerSelection = event => {
+      if (!pointerSelecting) return;
+      if (event.buttons === 0) {
+        pointerSelecting = false;
+      }
+      scheduleSelectionOverlay(session);
+    };
+    const endPointerSelection = () => {
+      if (!pointerSelecting) return;
+      pointerSelecting = false;
+      scheduleSelectionOverlay(session);
+    };
+    screen.addEventListener('pointerdown', beginPointerSelection, true);
+    window.addEventListener('pointermove', updatePointerSelection, true);
+    window.addEventListener('pointerup', endPointerSelection, true);
+    window.addEventListener('pointercancel', endPointerSelection, true);
+    session.selectionPointerCleanup = () => {
+      screen.removeEventListener('pointerdown', beginPointerSelection, true);
+      window.removeEventListener('pointermove', updatePointerSelection, true);
+      window.removeEventListener('pointerup', endPointerSelection, true);
+      window.removeEventListener('pointercancel', endPointerSelection, true);
+    };
+    scheduleSelectionOverlay(session);
   }
 
   async function writeSystemClipboard(text, announce = false, allowLegacy = false) {
@@ -656,6 +728,10 @@
       webglAddon: null,
       clipboardDisposable: null,
       copyListener: null,
+      selectionLayer: null,
+      selectionDisposables: [],
+      selectionRenderFrame: null,
+      selectionPointerCleanup: null,
       destroyed: false,
       reconnectAttempts: 0,
       reconnectTimer: null,
@@ -697,7 +773,7 @@
       if (!term.hasSelection() || !event.clipboardData) return;
       event.clipboardData.setData(
         'text/plain',
-        normalizeTerminalSelection(term.getSelection()),
+        normalizeSelectionFromTerminal(term),
       );
       event.preventDefault();
     };
@@ -718,11 +794,13 @@
     session.term = term;
     session.fitAddon = fitAddon;
     sessions.set(session.id, session);
+    installSelectionOverlay(session);
 
     term.onData(data => sendInput(session, data));
     term.onBinary(data => sendInput(session, Uint8Array.from(data, character => character.charCodeAt(0))));
     term.onResize(() => {
       if (session.id === activeId) scheduleResize(session);
+      scheduleSelectionOverlay(session);
     });
     term.attachCustomKeyEventHandler(event => {
       const copy = (event.ctrlKey && event.shiftKey && event.code === 'KeyC')
@@ -734,7 +812,7 @@
         if (event.type === 'keydown') {
           if (term.hasSelection()) {
             void writeSystemClipboard(
-              normalizeTerminalSelection(term.getSelection()),
+              normalizeSelectionFromTerminal(term),
               true,
               true,
             );
@@ -803,6 +881,12 @@
     clearTimeout(session.resizeTimer);
     if (session.socket && session.socket.readyState < WebSocket.CLOSING) session.socket.close(1000, 'tab closed');
     session.clipboardDisposable?.dispose();
+    for (const disposable of session.selectionDisposables) disposable.dispose();
+    if (session.selectionRenderFrame !== null) {
+      cancelAnimationFrame(session.selectionRenderFrame);
+    }
+    session.selectionPointerCleanup?.();
+    session.selectionLayer?.remove();
     if (session.copyListener) {
       session.pane.querySelector('.terminal-mount')
         ?.removeEventListener('copy', session.copyListener, true);

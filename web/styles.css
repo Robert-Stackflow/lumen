@@ -19,6 +19,7 @@
   --blue: #89b4fa;
   --mauve: #cba6f7;
   --terminal-bg: #10111a;
+  --terminal-selection: rgba(137, 180, 250, 0.26);
   --focus-ring: color-mix(in srgb, var(--blue) 32%, transparent);
   --chrome-height: 54px;
   --mobile-keys-height: 0px;
@@ -50,6 +51,7 @@
   --blue: #1e66f5;
   --mauve: #8839ef;
   --terminal-bg: #eff1f5;
+  --terminal-selection: rgba(30, 102, 245, 0.18);
   color-scheme: light;
 }
 
@@ -567,6 +569,22 @@ a:focus-visible {
 
 .terminal-mount .xterm-screen {
   text-rendering: geometricPrecision;
+}
+
+.terminal-selection-layer {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.terminal-selection-segment {
+  position: absolute;
+  display: block;
+  border-radius: 1px;
+  background: var(--terminal-selection);
+  pointer-events: none;
 }
 
 .terminal-mount .xterm-viewport {

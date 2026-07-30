@@ -248,8 +248,9 @@ LUMEN_PTY_SOCKET="$HOME/.local/state/lumen-terminal/pty.sock" \
 - 浏览器选区使用 `Ctrl+Shift+C`，macOS 使用 `Cmd+C`。
 - 粘贴使用 `Ctrl+Shift+V`，macOS 使用 `Cmd+V`；xterm.js 会保留
   bracketed paste 保护。
-- 复制时会逐个真实换行移除行尾的空格和 Tab；视觉自动换行仍会正确拼接，
-  因此 Codex 输出的多行命令可以直接粘贴执行。
+- 鼠标选区与复制内容共用同一套逐行范围：真实行尾的 Unicode 空白不会
+  高亮或进入剪贴板，常见的两列展示边距会在多行选区中自动移除；视觉
+  自动换行仍会正确拼接，因此 Codex 输出的多行命令可以直接粘贴执行。
 - 普通 shell 中右键保留浏览器的复制/粘贴菜单；若 TUI 主动接管鼠标，
   右键会和其他鼠标事件一样交给该程序。
 

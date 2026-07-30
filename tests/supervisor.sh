@@ -45,13 +45,29 @@ done
 LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list |
   grep -q '^test '
 
+replay_seen="false"
+for _ in {1..60}; do
+  {
+    sleep 0.05
+  } | LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" test \
+    >"$replay_output" || true
+  if grep -q 'LUMEN-PERSISTED' "$replay_output"; then
+    replay_seen="true"
+    break
+  fi
+  sleep 0.02
+done
+if [[ "$replay_seen" != "true" ]]; then
+  echo "Session output was not available for replay." >&2
+  exit 1
+fi
+
 {
   printf 'exit\n'
   sleep 0.3
 } | LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" test \
-  >"$replay_output" || true
+  >/dev/null || true
 
-grep -q 'LUMEN-PERSISTED' "$replay_output"
 session_removed="false"
 for _ in {1..150}; do
   session_list="$(

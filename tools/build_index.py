@@ -28,6 +28,7 @@ def main() -> None:
         "/*__FIT_JS__*/": inline_script(WEB / "vendor" / "addon-fit.js"),
         "/*__WEBGL_JS__*/": inline_script(WEB / "vendor" / "addon-webgl.js"),
         "/*__WEB_LINKS_JS__*/": inline_script(WEB / "vendor" / "addon-web-links.js"),
+        "/*__SELECTION_JS__*/": inline_script(WEB / "selection.js"),
         "/*__APP_JS__*/": inline_script(WEB / "app.js"),
     }
     for marker, content in replacements.items():
