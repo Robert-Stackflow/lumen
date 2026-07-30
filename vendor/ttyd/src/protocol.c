@@ -102,7 +102,9 @@ static void process_exit_cb(pty_process *process) {
 
   lwsl_notice("process exited with code %d, pid: %d\n", process->exit_code, process->pid);
   ctx->pss->process = NULL;
-  ctx->pss->lws_close_status = process->exit_code == 0 ? 1000 : 1006;
+  // lumen-pty status 4 means an administrator explicitly disconnected this
+  // browser connection. Preserve that intent across the websocket boundary.
+  ctx->pss->lws_close_status = process->exit_code == 4 ? 4001 : (process->exit_code == 0 ? 1000 : 1006);
   lws_callback_on_writable(ctx->pss->wsi);
 
 done:
@@ -130,12 +132,17 @@ static char **build_args(struct pss_tty *pss) {
 }
 
 static char **build_env(struct pss_tty *pss) {
-  int i = 0, n = 2;
+  int i = 0, n = 3;
   char **envp = xmalloc(n * sizeof(char *));
 
   // TERM
   envp[i] = xmalloc(36);
   snprintf(envp[i], 36, "TERM=%s", server->terminal_type);
+  i++;
+
+  // Pass the authenticated / trusted-proxy client address to lumen-pty.
+  envp[i] = xmalloc(strlen(pss->address) + 17);
+  sprintf(envp[i], "LUMEN_CLIENT_IP=%s", pss->address);
   i++;
 
   // TTYD_USER
@@ -237,6 +244,12 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
         return 1;
       }
       if (!check_auth(wsi, pss)) return 1;
+      lumen_auth_client_key(server->auth, wsi, pss->address, sizeof(pss->address));
+      if (!lumen_auth_ws_admit(server->auth, pss->address)) {
+        lumen_auth_audit(server->auth, "ws_rejected", pss->address, "per-ip-limit");
+        lwsl_warn("refuse WS client due to per-IP limit: %s\n", pss->address);
+        return 1;
+      }
 
       n = lws_hdr_copy(wsi, pss->path, sizeof(pss->path), WSI_TOKEN_GET_URI);
 #if defined(LWS_ROLE_H2)
@@ -274,8 +287,7 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
       }
 
       server->client_count++;
-
-      lws_get_peer_simple(lws_get_network_wsi(wsi), pss->address, sizeof(pss->address));
+      lumen_auth_ws_connected(server->auth, pss->address);
       lwsl_notice("WS   %s - %s, clients: %d\n", pss->path, pss->address, server->client_count);
       break;
 
@@ -406,6 +418,7 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
       if (pss->wsi == NULL) break;
 
       server->client_count--;
+      lumen_auth_ws_disconnected(server->auth, pss->address);
       lwsl_notice("WS closed from %s, clients: %d\n", pss->address, server->client_count);
       if (pss->buffer != NULL) free(pss->buffer);
       if (pss->pty_buf != NULL) pty_buf_free(pss->pty_buf);

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lumen.local/schemas/session-api.json",
+  "title": "Lumen session inventory",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": [
+      "id", "pid", "clients", "historyBytes", "historyTruncated",
+      "rows", "columns", "createdAt", "connections"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+      "pid": { "type": "integer", "minimum": 0 },
+      "clients": { "type": "integer", "minimum": 0 },
+      "historyBytes": { "type": "integer", "minimum": 0 },
+      "historyTruncated": { "type": "boolean" },
+      "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+      "columns": { "type": "integer", "minimum": 0, "maximum": 65535 },
+      "createdAt": { "type": "integer", "minimum": 0 },
+      "connections": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["id", "connectedAt", "ip", "rows", "columns", "browserKey"],
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "connectedAt": { "type": "integer", "minimum": 0 },
+            "ip": { "type": "string", "maxLength": 63 },
+            "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "columns": { "type": "integer", "minimum": 0, "maximum": 65535 },
+            "browserKey": {
+              "type": "string",
+              "pattern": "^$|^[0-9a-fA-F-]{36}$"
+            }
+          }
+        }
+      }
+    }
+  }
+}

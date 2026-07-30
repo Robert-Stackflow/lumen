@@ -24,8 +24,11 @@ supervisor: src/lumen-pty.c
 check: build
 	python3 -m py_compile tools/build_index.py
 	python3 tests/theme_contract.py
+	python3 tests/session_schema.py
+	python3 tests/login_template.py
 	@if command -v node >/dev/null 2>&1; then \
 		node tests/selection.js; \
+		node tests/session_manager.js; \
 	else \
 		echo "node unavailable; selection unit tests skipped"; \
 	fi

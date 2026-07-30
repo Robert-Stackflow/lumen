@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>登录 · Lumen</title>
+  <style>
+    :root{color-scheme:dark;--bg:#10111a;--card:#191925;--field:#1d1d2b;--hover:#242435;--line:rgba(205,214,244,.11);--strong:#eef1fb;--muted:#8b90a7;--green:#a6e3a1;--blue:#89b4fa;--red:#f38ba8;--button:#151722;--shadow:rgba(0,0,0,.36)}
+    @media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#eff1f5;--card:#e8ebf1;--field:#dfe3eb;--hover:#dce0e8;--line:rgba(76,79,105,.14);--strong:#303247;--muted:#6c6f85;--green:#40a02b;--blue:#1e66f5;--red:#d20f39;--button:#fff;--shadow:rgba(76,79,105,.15)}}
+    *{box-sizing:border-box}[hidden]{display:none!important}
+    body{margin:0;min-height:100dvh;display:grid;place-items:center;overflow:hidden;padding:24px;background:var(--bg);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+    body:before{content:"";position:fixed;top:-220px;left:50%;width:min(760px,90vw);height:420px;border-radius:50%;background:color-mix(in srgb,var(--blue) 10%,transparent);filter:blur(90px);transform:translateX(-50%);pointer-events:none}
+    .wrap{position:relative;width:min(100%,400px)}.brand{display:flex;align-items:center;gap:11px;margin:0 0 18px 4px}.brand-copy{display:grid;gap:4px}.brand strong{color:var(--strong);font:650 12px/1 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}.brand small{color:var(--muted);font-size:10px}
+    .mark{position:relative;width:24px;height:24px;border-radius:8px;background:linear-gradient(145deg,var(--hover),var(--field));box-shadow:inset 0 0 0 1px var(--line),0 5px 16px var(--shadow)}.mark:before{content:"";position:absolute;left:7px;top:7px;width:6px;height:6px;border-right:2px solid var(--green);border-bottom:2px solid var(--green);transform:rotate(-45deg)}.mark:after{content:"";position:absolute;right:5px;bottom:5px;width:6px;height:2px;border-radius:2px;background:var(--green)}
+    .card{padding:30px;border:1px solid var(--line);border-radius:18px;background:color-mix(in srgb,var(--card) 96%,transparent);box-shadow:0 26px 80px var(--shadow);backdrop-filter:blur(22px)}
+    .eyebrow{display:flex;align-items:center;gap:7px;margin:0 0 13px;color:var(--muted);font:600 10px/1 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}.eyebrow:before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green)}
+    h1{margin:0;color:var(--strong);font-size:22px;font-weight:680;letter-spacing:-.035em}.intro{margin:7px 0 25px;color:var(--muted);font-size:13px;line-height:1.65}
+    label{display:block;margin:0 0 7px;color:var(--muted);font-size:12px;font-weight:520}input{width:100%;height:44px;margin:0 0 17px;padding:0 13px;border:1px solid var(--line);border-radius:10px;outline:0;background:var(--field);color:var(--strong);font:500 14px/1 ui-monospace,monospace}input:hover{background:var(--hover)}input:focus{border-color:var(--blue);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 16%,transparent)}
+    button{width:100%;height:44px;border:1px solid color-mix(in srgb,var(--green) 70%,transparent);border-radius:10px;background:var(--green);color:var(--button);font-size:13px;font-weight:700;cursor:pointer}button:hover{filter:brightness(1.045)}button:disabled{opacity:.55;cursor:not-allowed}
+    .error{display:none;margin:-2px 0 17px;padding:10px 11px;border:1px solid color-mix(in srgb,var(--red) 28%,transparent);border-radius:9px;background:color-mix(in srgb,var(--red) 8%,transparent);color:var(--red);font-size:12px;line-height:1.5}.error-visible{display:block}
+    #passkey{margin-top:10px;background:transparent;color:var(--strong);border-color:var(--line);box-shadow:none}.note{margin:17px 2px 0;text-align:center;color:var(--muted);font-size:11px;line-height:1.6}
+    @media(max-width:480px){body{padding:18px}.card{padding:25px 21px}}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="brand"><span class="mark" aria-hidden="true"></span><span class="brand-copy"><strong>lumen</strong><small>persistent web terminal</small></span></div>
+    <section class="card">
+      <div class="eyebrow">Secure session</div>
+      <h1>继续你的终端</h1>
+      <p class="intro">登录后，此设备会安全地保持会话，回来即可继续工作。</p>
+      <form method="post" action="{{BASE_PATH}}/auth/login" autocomplete="on">
+        <input type="hidden" name="csrf" value="{{CSRF}}">
+        <label for="username">账号</label>
+        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="64" required autofocus>
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+        {{TOTP_FIELD}}
+        <div id="login-error" class="error{{ERROR_CLASS}}" role="alert">{{ERROR_MESSAGE}}</div>
+        <button type="submit"{{BUTTON_DISABLED}}>{{BUTTON_TEXT}}</button>
+      </form>
+      <button id="passkey"{{PASSKEY_HIDDEN}} type="button">使用通行密钥</button>
+    </section>
+    <div class="note">安全会话仅保存在当前浏览器 · Lumen 不会保存明文密码</div>
+  </main>
+  <script>
+    const cv=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/').padEnd(s.length+(4-s.length%4)%4,'=')),c=>c.charCodeAt(0));
+    const vc=b=>btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    document.getElementById('passkey').onclick=async()=>{try{const o=await fetch('{{BASE_PATH}}/auth/passkey/options',{credentials:'same-origin'}).then(r=>r.json());o.challenge=cv(o.challenge);o.allowCredentials=o.allowCredentials.map(x=>({...x,id:cv(x.id)}));const c=await navigator.credentials.get({publicKey:o});const body={id:vc(c.rawId),clientDataJSON:vc(c.response.clientDataJSON),authenticatorData:vc(c.response.authenticatorData),signature:vc(c.response.signature)};const r=await fetch('{{BASE_PATH}}/auth/passkey/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok||r.status===303)location.href='{{BASE_PATH}}/';else throw Error()}catch(e){const banner=document.getElementById('login-error');banner.textContent='通行密钥验证失败，请重试。';banner.classList.add('error-visible')}};
+  </script>
+</body>
+</html>

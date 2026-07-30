@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark light">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+        content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src data:; font-src 'self'; base-uri 'none'; form-action 'none'">
   <title>Lumen Terminal</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23161622'/%3E%3Cpath d='m17 20 12 12-12 12M32 44h15' fill='none' stroke='%23a6e3a1' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <script>
@@ -43,10 +43,17 @@
       </div>
 
       <div class="chrome-actions">
+        <button id="focus-toggle" class="icon-button" type="button" title="页面全屏" aria-label="进入页面全屏">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
+          </svg>
+        </button>
         <button id="settings-toggle" class="icon-button" type="button" title="终端设置" aria-label="打开终端设置">
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/>
-            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.37a1.7 1.7 0 0 0-1 .63 1.7 1.7 0 0 0-.37 1.08V21h-4v-.08A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.23 15a1.7 1.7 0 0 0-.63-1A1.7 1.7 0 0 0 2.52 13H2V9h.52A1.7 1.7 0 0 0 4 8a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 8.37 3a1.7 1.7 0 0 0 1-.63A1.7 1.7 0 0 0 9.74 1.3V1h4v.3A1.7 1.7 0 0 0 15 3a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 7a1.7 1.7 0 0 0 .63 1c.3.25.68.4 1.08.4H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/>
+            <path d="M4 7h10M18 7h2M4 17h2M10 17h10M4 12h4M12 12h8"/>
+            <circle cx="16" cy="7" r="2"/>
+            <circle cx="8" cy="17" r="2"/>
+            <circle cx="10" cy="12" r="2"/>
           </svg>
         </button>
         <button id="theme-toggle" class="icon-button" type="button" title="切换到浅色主题" aria-label="切换到浅色主题">
@@ -101,125 +108,281 @@
       <div class="settings-heading">
         <div>
           <h2 id="settings-dialog-title">终端设置</h2>
-          <p>设置只保存在当前浏览器中。</p>
+          <p>设置会安全同步到所有已登录设备。</p>
         </div>
         <button class="settings-close" type="submit" value="close" aria-label="关闭设置">
           <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>
         </button>
       </div>
 
-      <div class="settings-list">
-        <label class="settings-row settings-toggle-row">
-          <span>
-            <strong>选中复制</strong>
-            <small>鼠标选取终端文字后自动复制到系统剪贴板</small>
-          </span>
-          <input id="setting-copy-selection" type="checkbox">
-          <i class="switch" aria-hidden="true"></i>
-        </label>
+      <div class="settings-layout">
+        <nav class="settings-sidebar" aria-label="设置分类">
+          <button type="button" data-settings-tab="general" aria-selected="true">常规</button>
+          <button type="button" data-settings-tab="appearance" aria-selected="false">外观</button>
+          <button type="button" data-settings-tab="shortcuts" aria-selected="false">快捷键</button>
+          <button type="button" data-settings-tab="sessions" aria-selected="false">会话</button>
+          <button type="button" data-settings-tab="snippets" aria-selected="false">命令片段</button>
+          <button type="button" data-settings-tab="security" aria-selected="false">安全</button>
+        </nav>
 
-        <div class="settings-row">
-          <span>
-            <strong>关闭默认行为</strong>
-            <small>点击标签关闭按钮时如何处理后台任务</small>
-          </span>
-          <div id="setting-close-behavior" class="custom-select" data-value="ask">
-            <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-              <span>每次询问</span>
-              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
-            </button>
-            <div class="custom-select-menu" role="listbox" hidden>
-              <button type="button" role="option" data-value="ask">每次询问</button>
-              <button type="button" role="option" data-value="detach">仅关闭标签</button>
-              <button type="button" role="option" data-value="terminate">终止会话</button>
+        <div class="settings-content">
+          <section class="settings-panel" data-settings-panel="general">
+            <header><h3>常规</h3><p>终端行为和会话工具</p></header>
+            <div class="settings-list">
+              <label class="settings-row settings-toggle-row">
+                <span><strong>选中复制</strong><small>鼠标选取终端文字后自动复制到系统剪贴板</small></span>
+                <input id="setting-copy-selection" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+              </label>
+              <label class="settings-row">
+                <span><strong>新标签工作目录</strong><small>新建会话连接后自动切换到此目录</small></span>
+                <input id="setting-working-directory" class="settings-text-input" type="text" maxlength="240"
+                       placeholder="/home/ubuntu">
+              </label>
+              <label class="settings-row settings-toggle-row">
+                <span><strong>继承当前目录</strong><small>新标签优先使用当前终端通过 OSC 7 报告的目录</small></span>
+                <input id="setting-inherit-working-directory" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+              </label>
             </div>
-          </div>
-        </div>
-
-        <label class="settings-row settings-font-row">
-          <span>
-            <strong>终端字号</strong>
-            <small>即时调整所有标签的文字和终端布局</small>
-          </span>
-          <span class="font-size-control">
-            <input id="setting-font-size" type="range" min="11" max="20" step="1">
-            <output id="setting-font-size-value" for="setting-font-size"></output>
-          </span>
-        </label>
-
-        <div class="settings-row">
-          <span>
-            <strong>光标样式</strong>
-            <small>调整终端插入光标的形状</small>
-          </span>
-          <div id="setting-cursor-style" class="custom-select" data-value="bar">
-            <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
-              <span>竖线</span>
-              <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
-            </button>
-            <div class="custom-select-menu" role="listbox" hidden>
-              <button type="button" role="option" data-value="bar">竖线</button>
-              <button type="button" role="option" data-value="block">方块</button>
-              <button type="button" role="option" data-value="underline">下划线</button>
+            <div class="settings-tools">
+              <button id="export-terminal" type="button">导出当前输出</button>
             </div>
-          </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="appearance" hidden>
+            <header><h3>外观</h3><p>字体、行距与光标显示</p></header>
+            <div class="settings-list">
+              <label class="settings-row settings-font-row">
+                <span><strong>终端字号</strong><small>即时调整所有标签的文字和终端布局</small></span>
+                <span class="font-size-control">
+                  <input id="setting-font-size" type="range" min="11" max="20" step="1">
+                  <output id="setting-font-size-value" for="setting-font-size"></output>
+                </span>
+              </label>
+              <div class="settings-row">
+                <span><strong>字体系列</strong><small>选择终端优先使用的等宽字体</small></span>
+                <div id="setting-font-family" class="custom-select" data-value="system">
+                  <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span>系统等宽</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                  </button>
+                  <div class="custom-select-menu" role="listbox" hidden>
+                    <button type="button" role="option" data-value="system">系统等宽</button>
+                    <button type="button" role="option" data-value="jetbrains">JetBrains Mono</button>
+                    <button type="button" role="option" data-value="cascadia">Cascadia Code</button>
+                  </div>
+                </div>
+              </div>
+              <label class="settings-row settings-font-row">
+                <span><strong>字体粗细</strong><small>调整普通终端文字的字重</small></span>
+                <span class="font-size-control">
+                  <input id="setting-font-weight" type="range" min="300" max="700" step="100">
+                  <output id="setting-font-weight-value" for="setting-font-weight"></output>
+                </span>
+              </label>
+              <label class="settings-row settings-font-row">
+                <span><strong>字符间距</strong><small>调整字符之间的水平间距</small></span>
+                <span class="font-size-control">
+                  <input id="setting-letter-spacing" type="range" min="-1" max="2" step="0.1">
+                  <output id="setting-letter-spacing-value" for="setting-letter-spacing"></output>
+                </span>
+              </label>
+              <div class="settings-row">
+                <span><strong>光标样式</strong><small>调整终端插入光标的形状</small></span>
+                <div id="setting-cursor-style" class="custom-select" data-value="bar">
+                  <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span>竖线</span>
+                    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                  </button>
+                  <div class="custom-select-menu" role="listbox" hidden>
+                    <button type="button" role="option" data-value="bar">竖线</button>
+                    <button type="button" role="option" data-value="block">方块</button>
+                    <button type="button" role="option" data-value="underline">下划线</button>
+                  </div>
+                </div>
+              </div>
+              <label class="settings-row settings-toggle-row">
+                <span><strong>光标闪烁</strong><small>让活动终端的光标保持闪烁</small></span>
+                <input id="setting-cursor-blink" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+              </label>
+              <label class="settings-row settings-font-row">
+                <span><strong>行高</strong><small>调整终端文字的垂直间距</small></span>
+                <span class="font-size-control">
+                  <input id="setting-line-height" type="range" min="1" max="1.6" step="0.05">
+                  <output id="setting-line-height-value" for="setting-line-height"></output>
+                </span>
+              </label>
+              <label class="settings-row settings-font-row">
+                <span><strong>滚回历史</strong><small>每个标签在浏览器中保留的最大行数</small></span>
+                <span class="font-size-control">
+                  <input id="setting-scrollback" type="range" min="1000" max="50000" step="1000">
+                  <output id="setting-scrollback-value" for="setting-scrollback"></output>
+                </span>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="shortcuts" hidden>
+            <header><h3>快捷键</h3><p>点击输入框后按下新的组合键</p></header>
+            <div class="settings-list">
+              <div class="settings-row settings-shortcuts">
+                <span><strong>终端操作</strong><small>快捷键会同步到所有已登录设备</small></span>
+                <span class="shortcut-fields">
+                  <label>搜索 <input id="setting-shortcut-search" type="text" readonly></label>
+                  <label>新建 <input id="setting-shortcut-new-tab" type="text" readonly></label>
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="sessions" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>会话</h3><p>查看后台终端及连接详情，并可单独断开连接</p></span>
+              <button id="refresh-session-manager" type="button">刷新</button>
+            </header>
+            <div class="session-manager-toolbar">
+              <input id="session-manager-search" type="search" placeholder="搜索名称、备注或会话 ID">
+              <div id="session-manager-sort" class="custom-select" data-value="created-desc">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>最近创建</span>
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="created-desc">最近创建</button>
+                  <button type="button" role="option" data-value="created-asc">最早创建</button>
+                  <button type="button" role="option" data-value="name">按名称</button>
+                  <button type="button" role="option" data-value="connections">按连接数</button>
+                </div>
+              </div>
+            </div>
+            <div id="session-manager-list" class="session-manager-list">
+              <div class="session-manager-loading">正在读取会话…</div>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="snippets" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>命令片段</h3><p>收藏常用命令，并发送到当前终端</p></span>
+              <button id="add-command-snippet" type="button">添加</button>
+            </header>
+            <div id="command-snippet-editor" class="command-snippet-editor" hidden>
+              <div class="command-snippet-editor-heading">
+                <span><strong>编辑命令片段</strong><small>命令只会在你点击发送时写入终端</small></span>
+              </div>
+              <label class="command-snippet-field">
+                <span>名称</span>
+                <input id="command-snippet-name" type="text" maxlength="40" placeholder="例如：查看服务状态">
+              </label>
+              <label class="command-snippet-field">
+                <span>命令</span>
+                <textarea id="command-snippet-command" maxlength="2000" rows="4"
+                          placeholder="systemctl status lumen-web"></textarea>
+              </label>
+              <label class="snippet-run-toggle">
+                <span><strong>发送后立即执行</strong><small>关闭时只填入命令，方便继续编辑</small></span>
+                <input id="command-snippet-run" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+              </label>
+              <div class="command-snippet-editor-actions">
+                <button id="cancel-command-snippet" type="button">取消</button>
+                <button id="save-command-snippet" class="primary" type="button">保存片段</button>
+              </div>
+            </div>
+            <div id="command-snippet-list" class="command-snippet-list"></div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="security" hidden>
+            <header><h3>安全</h3><p>管理登录方式和当前设备会话</p></header>
+            <div class="security-section">
+              <div class="security-section-heading">
+                <span><strong>通行密钥</strong><small>使用设备生物识别或安全密钥登录</small></span>
+                <button id="register-passkey" type="button">添加</button>
+              </div>
+              <div id="passkey-list" class="passkey-list" aria-live="polite">
+                <p class="passkey-empty">正在读取通行密钥…</p>
+              </div>
+            </div>
+            <div class="security-section security-action-row">
+              <span><strong>动态验证码</strong><small id="totp-status">正在读取状态…</small></span>
+              <button id="enable-totp" type="button">启用</button>
+            </div>
+            <div class="settings-tools security-tools">
+              <button id="logout-session" class="settings-logout" type="button">退出当前设备</button>
+            </div>
+          </section>
         </div>
-
-        <label class="settings-row settings-toggle-row">
-          <span>
-            <strong>光标闪烁</strong>
-            <small>让活动终端的光标保持闪烁</small>
-          </span>
-          <input id="setting-cursor-blink" type="checkbox">
-          <i class="switch" aria-hidden="true"></i>
-        </label>
-
-        <label class="settings-row settings-font-row">
-          <span>
-            <strong>行高</strong>
-            <small>调整终端文字的垂直间距</small>
-          </span>
-          <span class="font-size-control">
-            <input id="setting-line-height" type="range" min="1" max="1.6" step="0.05">
-            <output id="setting-line-height-value" for="setting-line-height"></output>
-          </span>
-        </label>
-
-        <label class="settings-row">
-          <span>
-            <strong>新标签工作目录</strong>
-            <small>新建会话连接后自动切换到此目录</small>
-          </span>
-          <input id="setting-working-directory" class="settings-text-input" type="text" maxlength="240"
-                 placeholder="/home/ubuntu">
-        </label>
-
-        <label class="settings-row settings-toggle-row">
-          <span>
-            <strong>终止前确认</strong>
-            <small>默认终止会话时仍先确认，防止误杀运行中的任务</small>
-          </span>
-          <input id="setting-protect-running" type="checkbox">
-          <i class="switch" aria-hidden="true"></i>
-        </label>
-
-        <div class="settings-row settings-shortcuts">
-          <span>
-            <strong>快捷键</strong>
-            <small>点击输入框后按下新的组合键</small>
-          </span>
-          <span class="shortcut-fields">
-            <label>搜索 <input id="setting-shortcut-search" type="text" readonly></label>
-            <label>新建 <input id="setting-shortcut-new-tab" type="text" readonly></label>
-          </span>
-        </div>
-      </div>
-
-      <div class="settings-tools">
-        <button id="open-session-manager" type="button">管理会话</button>
-        <button id="export-terminal" type="button">导出当前输出</button>
       </div>
     </form>
+    </dialog>
+
+    <dialog id="connection-dialog" class="session-dialog connection-dialog" aria-labelledby="connection-dialog-title">
+      <div class="session-dialog-card">
+        <div class="dialog-heading">
+          <span class="dialog-mark connection-dialog-mark" aria-hidden="true"></span>
+          <div>
+            <h2 id="connection-dialog-title">断开此连接？</h2>
+            <p id="connection-dialog-description"></p>
+          </div>
+        </div>
+        <div class="connection-dialog-note">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 6.2v4.3m0 3.2h.01M10 2.1a7.9 7.9 0 1 1 0 15.8 7.9 7.9 0 0 1 0-15.8Z"/></svg>
+          <span>只关闭网络连接，不会结束终端中的程序。</span>
+        </div>
+        <div class="dialog-actions connection-dialog-actions">
+          <button id="connection-disconnect-cancel" class="dialog-cancel" type="button">取消</button>
+          <button id="connection-disconnect-confirm" class="dialog-primary danger" type="button">断开连接</button>
+        </div>
+      </div>
+    </dialog>
+
+  <dialog id="totp-setup-dialog" class="session-dialog totp-setup-dialog" aria-labelledby="totp-setup-title">
+    <div class="session-dialog-card">
+      <div class="dialog-heading">
+        <span class="dialog-mark totp-mark" aria-hidden="true"></span>
+        <div>
+          <h2 id="totp-setup-title">启用动态验证码</h2>
+          <p id="totp-setup-description">启用后，下次使用密码登录时必须同时输入验证器生成的六位验证码。</p>
+        </div>
+      </div>
+      <div id="totp-secret-panel" class="totp-secret-panel" hidden>
+        <canvas id="totp-qr" class="totp-qr" width="220" height="220" aria-label="TOTP 配置二维码"></canvas>
+        <label for="totp-secret-uri">验证器配置 URI</label>
+        <textarea id="totp-secret-uri" readonly rows="4"></textarea>
+        <small>扫描二维码或手动导入 URI，然后输入验证器显示的六位动态码。</small>
+      </div>
+      <label class="totp-code-field" for="totp-confirm-code">
+        <span>动态验证码</span>
+        <input id="totp-confirm-code" type="text" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]{6}" maxlength="6" placeholder="000000">
+      </label>
+      <div class="dialog-actions totp-dialog-actions">
+        <button id="totp-setup-cancel" class="dialog-cancel" type="button">取消</button>
+        <button id="totp-setup-copy" class="dialog-secondary" type="button" hidden>复制 URI</button>
+        <button id="totp-setup-confirm" class="dialog-primary" type="button">确认启用</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="passkey-action-dialog" class="session-dialog passkey-action-dialog"
+          aria-labelledby="passkey-action-title">
+    <div class="session-dialog-card">
+      <div class="dialog-heading">
+        <span class="dialog-mark passkey-mark" aria-hidden="true"></span>
+        <div>
+          <h2 id="passkey-action-title">管理通行密钥</h2>
+          <p id="passkey-action-description"></p>
+        </div>
+      </div>
+      <label id="passkey-name-field" class="passkey-name-field" for="passkey-name-input">
+        <span>名称</span>
+        <input id="passkey-name-input" type="text" maxlength="63" autocomplete="off">
+      </label>
+      <div class="dialog-actions passkey-dialog-actions">
+        <button id="passkey-action-cancel" class="dialog-cancel" type="button">取消</button>
+        <button id="passkey-action-confirm" class="dialog-primary" type="button">确认</button>
+      </div>
+    </div>
   </dialog>
 
   <div id="terminal-search" class="terminal-search" hidden>
@@ -230,22 +393,7 @@
     <button id="terminal-search-close" type="button" title="关闭">×</button>
   </div>
 
-  <dialog id="session-manager-dialog" class="session-dialog settings-dialog" aria-labelledby="session-manager-title">
-    <div class="session-dialog-card">
-      <div class="settings-heading">
-        <div>
-          <h2 id="session-manager-title">会话管理</h2>
-          <p>查看当前浏览器中的终端会话、连接状态和延迟。</p>
-        </div>
-        <button id="session-manager-close" class="settings-close" type="button" aria-label="关闭会话管理">
-          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>
-        </button>
-      </div>
-      <div id="session-manager-list" class="session-manager-list"></div>
-    </div>
-  </dialog>
-
-  <div id="toast" class="toast" role="status" aria-live="polite">
+  <div id="toast" class="toast" role="status" aria-live="polite" popover="manual">
     <span id="toast-message"></span>
     <button id="toast-action" type="button" hidden></button>
   </div>
@@ -256,7 +404,10 @@
   <script>/*__FIT_JS__*/</script>
   <script>/*__WEBGL_JS__*/</script>
   <script>/*__WEB_LINKS_JS__*/</script>
+  <script>/*__SERIALIZE_JS__*/</script>
   <script>/*__SELECTION_JS__*/</script>
+  <script>/*__SESSION_MANAGER_JS__*/</script>
+  <script>/*__TERMINAL_STATE_JS__*/</script>
   <script>/*__APP_JS__*/</script>
 </body>
 </html>

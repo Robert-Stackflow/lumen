@@ -11,6 +11,7 @@ usage() {
   echo "  --max-sessions <count>           Persistent PTY sessions (default: 16)"
   echo "  --history-bytes <bytes>          Reconnect replay per session (default: 2097152)"
   echo "  --ping-interval <seconds>        WebSocket keepalive (default: 15)"
+  echo "  --idle-timeout <seconds>         Reclaim detached idle sessions (default: 86400)"
   echo "  --client-ip-header <header>      Trusted proxy client-IP header"
   echo "  --insecure-cookie                Permit session cookies over HTTP"
   echo "  --allow-sudo                     Install NOPASSWD: ALL for the shell user"
@@ -41,6 +42,7 @@ max_clients="16"
 max_sessions="16"
 history_bytes="2097152"
 ping_interval="15"
+idle_timeout="86400"
 client_ip_header=""
 cookie_secure="true"
 allow_sudo="false"
@@ -70,6 +72,10 @@ while (($#)); do
       ;;
     --ping-interval)
       ping_interval="${2:-}"
+      shift 2
+      ;;
+    --idle-timeout)
+      idle_timeout="${2:-}"
       shift 2
       ;;
     --client-ip-header)
@@ -127,6 +133,10 @@ if [[ ! "$history_bytes" =~ ^[0-9]+$ ]] ||
 fi
 if [[ ! "$ping_interval" =~ ^[0-9]+$ ]] || ((ping_interval > 300)); then
   echo "Invalid ping interval: $ping_interval" >&2
+  exit 64
+fi
+if [[ ! "$idle_timeout" =~ ^[0-9]+$ ]] || ((idle_timeout > 31536000)); then
+  echo "Invalid idle timeout: $idle_timeout" >&2
   exit 64
 fi
 if [[ -n "$client_ip_header" && ! "$client_ip_header" =~ ^[A-Za-z0-9-]+$ ]]; then
@@ -193,6 +203,7 @@ install -d -o "$service_user" -g "$service_group" -m 0700 "$state_root"
 install -o root -g root -m 0755 "$project_dir/bin/lumen-ttyd" "$install_dir/bin/lumen-ttyd"
 install -o root -g root -m 0755 "$project_dir/bin/lumen-pty" "$install_dir/bin/lumen-pty"
 install -o root -g root -m 0644 "$project_dir/dist/index.html" "$install_dir/dist/index.html"
+install -o root -g root -m 0644 "$project_dir/web/login.template.html" "$install_dir/dist/login.html"
 install -o root -g root -m 0755 "$project_dir/scripts/lumen-auth" "$install_dir/scripts/lumen-auth"
 install -o root -g root -m 0644 "$project_dir/README.md" "$install_dir/README.md"
 
@@ -203,6 +214,7 @@ if [[ ! -e "$security_path" ]]; then
     --config "$security_path"
     --username "$service_user"
     --host "$allowed_host"
+    --state-dir "$state_root"
   )
   if [[ "$cookie_secure" == "false" ]]; then
     auth_args+=(--insecure-cookie)
@@ -226,6 +238,7 @@ runtime_temp="$(mktemp "$security_dir/.runtime.XXXXXX")"
   printf 'LUMEN_MAX_SESSIONS=%s\n' "$max_sessions"
   printf 'LUMEN_PTY_HISTORY_BYTES=%s\n' "$history_bytes"
   printf 'LUMEN_PING_INTERVAL=%s\n' "$ping_interval"
+  printf 'LUMEN_IDLE_SESSION_SECONDS=%s\n' "$idle_timeout"
 } >"$runtime_temp"
 chown root:root "$runtime_temp"
 chmod 0600 "$runtime_temp"

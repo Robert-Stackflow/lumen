@@ -23,7 +23,7 @@ else()
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS _GNU_SOURCE)
 endif()
 
-set(SOURCE_FILES src/utils.c src/pty.c src/protocol.c src/http.c src/auth.c src/server.c)
+set(SOURCE_FILES src/utils.c src/pty.c src/protocol.c src/http.c src/auth.c src/webauthn.c src/preferences.c src/server.c)
 
 include(FindPackageHandleStandardArgs)
 
@@ -47,6 +47,8 @@ endif()
 
 find_package(ZLIB REQUIRED)
 find_package(Libwebsockets 3.2.0 REQUIRED)
+find_library(FIDO2_LIBRARY NAMES fido2 REQUIRED)
+find_library(QRENCODE_LIBRARY NAMES qrencode REQUIRED)
 
 set(INCLUDE_DIRS ${ZLIB_INCLUDE_DIR} ${LIBWEBSOCKETS_INCLUDE_DIRS} ${JSON-C_INCLUDE_DIRS} ${LIBUV_INCLUDE_DIRS})
 if(MSVC)
@@ -58,7 +60,7 @@ if(MSVC)
         set(LINK_LIBS ${ZLIB_LIBRARIES} websockets ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
     endif()
 else()
-    set(LINK_LIBS ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES})
+    set(LINK_LIBS ${ZLIB_LIBRARIES} ${LIBWEBSOCKETS_LIBRARIES} ${JSON-C_LIBRARIES} ${LIBUV_LIBRARIES} ${FIDO2_LIBRARY} ${QRENCODE_LIBRARY})
 endif()
 
 set (CMAKE_REQUIRED_INCLUDES ${INCLUDE_DIRS})

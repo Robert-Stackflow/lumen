@@ -42,8 +42,9 @@ apt-get install -y \
   libjson-c-dev \
   libssl-dev \
   libuv1-dev \
-  libwebsockets-dev \
+  libwebsockets-dev libfido2-dev libqrencode-dev \
   python3 \
+  tmux \
   zlib1g-dev
 
 make -C "$project_dir" check

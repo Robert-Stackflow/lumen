@@ -2,7 +2,8 @@
 
 Lumen 是一个面向个人设备的轻量 Web terminal。界面采用克制的
 Ghostty 风格；后端基于精简的 ttyd C/libuv 服务；每个浏览器标签连接
-一个由 Lumen 自己持有的真实、持久 PTY，不使用 tmux。
+一个由 Lumen 管理、由 tmux 承载的持久 PTY。Web 与 PTY 管理进程都可独立
+更新或重启，真实 shell 和后台任务仍会保留。
 
 ## 功能
 
@@ -57,7 +58,7 @@ username=Ran
 password_hash=pbkdf2-sha256$600000$<salt>$<hash>
 session_secret=<32-byte-random-secret>
 session_generation=1
-session_ttl_days=180
+session_ttl_days=30
 cookie_secure=true
 allowed_host=terminal.example.com
 proxy_header=X-Remote-User
@@ -65,6 +66,14 @@ client_ip_header=X-Real-IP
 login_max_failures=5
 login_window_seconds=300
 login_lockout_seconds=300
+rate_limit_state=/home/ubuntu/.local/state/lumen-terminal/login-rates
+audit_log=/home/ubuntu/.local/state/lumen-terminal/security-audit.log
+passkey_store=/home/ubuntu/.local/state/lumen-terminal/passkeys
+totp_secret_file=/home/ubuntu/.local/state/lumen-terminal/totp-secret
+preferences_file=/home/ubuntu/.local/state/lumen-terminal/preferences.json
+max_connections_per_ip=4
+ws_max_attempts=20
+ws_rate_window_seconds=60
 ```
 
 `session` 模式包含：
@@ -73,10 +82,12 @@ login_lockout_seconds=300
 - 签名的随机设备会话；不在浏览器存储密码或可供 JavaScript 读取的令牌。
 - `Secure`、`HttpOnly`、`SameSite=Strict`、host-only 持久 Cookie。
 - Host 白名单、同源 Origin 和双提交 CSRF 校验；隐私浏览器发送 `Origin: null` 时仍须通过完整 CSRF 校验。
-- 每个来源 IP 的登录失败窗口，以及最长 24 小时的递增锁定。
+- 每个来源 IP 的持久化登录失败窗口，以及最长 24 小时的递增锁定。
+- 可在设置中启用 TOTP 动态验证码，或注册要求用户验证的 WebAuthn 通行密钥。
+- 每 IP WebSocket 并发与建连速率限制，以及不包含命令内容的安全审计日志。
 - CSP、禁止 iframe、禁缓存、MIME 嗅探防护等响应头。
 
-会话有效期默认为 180 天，每次正常打开页面会续期，所以经常使用的设备
+会话有效期默认为 30 天，每次正常打开页面会续期，所以经常使用的设备
 不会反复要求登录。丢失设备时可一次撤销全部设备会话：
 
 ```bash
@@ -186,8 +197,9 @@ sudo ./scripts/install.sh ubuntu terminal.example.com \
 `lumen-pty.service`（PTY、shell、Codex）。正常更新只重启前者；
 浏览器会自动重连，后者及其中的任务不会中断。因此可以从 Lumen 内运行
 Codex 修改并重新安装 Lumen，而不需要依赖 Codex 的恢复功能。
-只有显式重启/停止 `lumen-pty.service`、重启主机、结束会话或 shell 自行退出
-才会结束其中的程序；普通 `install.sh` 更新不会重启 supervisor。
+显式重启 `lumen-pty.service` 也不会结束其中的程序；新进程会重新发现 tmux
+中的 Lumen 会话。只有在界面结束会话、shell 自行退出或主动清理 tmux 会话时
+才会终止任务。
 
 从旧 tmux 架构首次迁移时，安装器会先启动新的 PTY supervisor，同时保留
 旧服务，避免杀掉其中仍在运行的任务。验证新终端后，从 SSH/控制台执行一次：

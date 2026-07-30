@@ -40,6 +40,8 @@ struct pss_http {
   size_t body_len;
   bool owns_buffer;
   bool login_post;
+  bool response_pending;
+  int auth_action;
   char *cookies;
   size_t cookies_len;
   char origin[512];

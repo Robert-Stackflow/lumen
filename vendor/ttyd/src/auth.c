@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 #define SESSION_NONCE_LEN 32
@@ -58,6 +59,29 @@ static bool hex_decode(const char *source, unsigned char *target, size_t target_
     if (high < 0 || low < 0) return false;
     target[i] = (unsigned char)((high << 4) | low);
   }
+  return true;
+}
+
+static bool base32_decode(const char *source, unsigned char *target, size_t target_size, size_t *target_len) {
+  unsigned int bits = 0, accumulator = 0;
+  size_t written = 0;
+  for (const char *cursor = source; *cursor; cursor++) {
+    unsigned char c = (unsigned char)toupper((unsigned char)*cursor);
+    if (c == ' ' || c == '-') continue;
+    if (c == '=') break;
+    int value = c >= 'A' && c <= 'Z' ? c - 'A' : c >= '2' && c <= '7' ? c - '2' + 26 : -1;
+    if (value < 0) return false;
+    accumulator = (accumulator << 5) | (unsigned int)value;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      if (written >= target_size) return false;
+      target[written++] = (unsigned char)(accumulator >> bits);
+      accumulator &= (1U << bits) - 1U;
+    }
+  }
+  if (written < 10) return false;
+  *target_len = written;
   return true;
 }
 
@@ -175,6 +199,9 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
   auth->login_max_failures = 5;
   auth->login_window = 300;
   auth->login_lockout = 300;
+  auth->max_connections_per_ip = 4;
+  auth->ws_max_attempts = 20;
+  auth->ws_rate_window = 60;
 
   bool have_password = false;
   bool have_secret = false;
@@ -279,6 +306,60 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
         snprintf(error, error_len, "invalid login_lockout_seconds on line %d", line_number);
         goto fail;
       }
+    } else if (!strcmp(key, "totp_secret")) {
+      if (!base32_decode(value, auth->totp_secret, sizeof(auth->totp_secret), &auth->totp_secret_len)) {
+        snprintf(error, error_len, "invalid totp_secret on line %d", line_number);
+        goto fail;
+      }
+    } else if (!strcmp(key, "totp_secret_file")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->totp_secret_file)) {
+        snprintf(error, error_len, "invalid totp_secret_file on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->totp_secret_file, sizeof(auth->totp_secret_file), "%s", value);
+    } else if (!strcmp(key, "rate_limit_state")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->rate_limit_state)) {
+        snprintf(error, error_len, "invalid rate_limit_state on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->rate_limit_state, sizeof(auth->rate_limit_state), "%s", value);
+    } else if (!strcmp(key, "audit_log")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->audit_log)) {
+        snprintf(error, error_len, "invalid audit_log on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->audit_log, sizeof(auth->audit_log), "%s", value);
+    } else if (!strcmp(key, "passkey_store")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->passkey_store)) {
+        snprintf(error, error_len, "invalid passkey_store on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->passkey_store, sizeof(auth->passkey_store), "%s", value);
+    } else if (!strcmp(key, "preferences_file")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->preferences_file)) {
+        snprintf(error, error_len, "invalid preferences_file on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->preferences_file, sizeof(auth->preferences_file), "%s", value);
+    } else if (!strcmp(key, "max_connections_per_ip")) {
+      int64_t parsed = 0;
+      if (!parse_i64(value, 1, 64, &parsed)) {
+        snprintf(error, error_len, "invalid max_connections_per_ip on line %d", line_number);
+        goto fail;
+      }
+      auth->max_connections_per_ip = (int)parsed;
+    } else if (!strcmp(key, "ws_max_attempts")) {
+      int64_t parsed = 0;
+      if (!parse_i64(value, 1, 1000, &parsed)) {
+        snprintf(error, error_len, "invalid ws_max_attempts on line %d", line_number);
+        goto fail;
+      }
+      auth->ws_max_attempts = (int)parsed;
+    } else if (!strcmp(key, "ws_rate_window_seconds")) {
+      if (!parse_i64(value, 1, 3600, &auth->ws_rate_window)) {
+        snprintf(error, error_len, "invalid ws_rate_window_seconds on line %d", line_number);
+        goto fail;
+      }
     } else {
       snprintf(error, error_len, "unknown security setting '%s' on line %d", key, line_number);
       goto fail;
@@ -293,6 +374,32 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
   if (!validate_session_config(auth, have_password, have_secret, error, error_len)) {
     lumen_auth_free(auth);
     return -1;
+  }
+  if (auth->rate_limit_state[0]) {
+    FILE *state = fopen(auth->rate_limit_state, "r");
+    if (state) {
+      size_t index = 0;
+      while (index < sizeof(auth->rates) / sizeof(auth->rates[0])) {
+        struct lumen_login_rate *rate = &auth->rates[index];
+        long long window_started = 0, locked_until = 0;
+        if (fscanf(state, "%63s %d %lld %lld", rate->client, &rate->failures,
+                   &window_started, &locked_until) != 4)
+          break;
+        rate->window_started = (int64_t)window_started;
+        rate->locked_until = (int64_t)locked_until;
+        index++;
+      }
+      fclose(state);
+    }
+  }
+  if (auth->totp_secret_file[0] && !auth->totp_secret_len) {
+    FILE *totp = fopen(auth->totp_secret_file, "r");
+    if (totp) {
+      char encoded[256] = "";
+      if (fscanf(totp, "%255s", encoded) == 1)
+        base32_decode(encoded, auth->totp_secret, sizeof(auth->totp_secret), &auth->totp_secret_len);
+      fclose(totp);
+    }
   }
   *result = auth;
   return 0;
@@ -443,9 +550,200 @@ void lumen_auth_client_key(struct lumen_auth *auth, struct lws *wsi, char *clien
   if (copied > 0) {
     char *comma = strchr(client, ',');
     if (comma) *comma = '\0';
-    return;
+    for (char *p = client; *p; p++)
+      if (!isxdigit((unsigned char)*p) && *p != '.' && *p != ':') {
+        copied = 0;
+        break;
+      }
+    if (copied > 0) return;
   }
   lws_get_peer_simple(lws_get_network_wsi(wsi), client, (int)client_len);
+}
+
+static void save_rates(struct lumen_auth *auth) {
+  if (!auth->rate_limit_state[0]) return;
+  char temporary[sizeof(auth->rate_limit_state) + 32];
+  if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", auth->rate_limit_state, (long)getpid()) <= 0) return;
+  FILE *file = fopen(temporary, "w");
+  if (!file) return;
+  chmod(temporary, 0600);
+  for (size_t i = 0; i < sizeof(auth->rates) / sizeof(auth->rates[0]); i++) {
+    struct lumen_login_rate *rate = &auth->rates[i];
+    if (rate->client[0])
+      fprintf(file, "%s %d %lld %lld\n", rate->client, rate->failures, (long long)rate->window_started,
+              (long long)rate->locked_until);
+  }
+  if (fclose(file) == 0) rename(temporary, auth->rate_limit_state);
+  else unlink(temporary);
+}
+
+void lumen_auth_audit(struct lumen_auth *auth, const char *event, const char *client, const char *detail) {
+  if (!auth || !auth->audit_log[0]) return;
+  FILE *file = fopen(auth->audit_log, "a");
+  if (!file) return;
+  chmod(auth->audit_log, 0600);
+  time_t now = time(NULL);
+  struct tm timestamp;
+  gmtime_r(&now, &timestamp);
+  char formatted[32];
+  strftime(formatted, sizeof(formatted), "%Y-%m-%dT%H:%M:%SZ", &timestamp);
+  fprintf(file, "%s event=%s client=%s detail=%s\n", formatted, event ? event : "-", client ? client : "-",
+          detail ? detail : "-");
+  fclose(file);
+}
+
+static struct lumen_ws_rate *ws_rate_entry(struct lumen_auth *auth, const char *client, int64_t now) {
+  struct lumen_ws_rate *oldest = &auth->ws_rates[0];
+  for (size_t i = 0; i < sizeof(auth->ws_rates) / sizeof(auth->ws_rates[0]); i++) {
+    struct lumen_ws_rate *entry = &auth->ws_rates[i];
+    if (entry->client[0] && !strcmp(entry->client, client)) return entry;
+    if (!entry->client[0]) {
+      snprintf(entry->client, sizeof(entry->client), "%s", client);
+      entry->window_started = now;
+      return entry;
+    }
+    if (!entry->active && entry->window_started < oldest->window_started) oldest = entry;
+  }
+  if (oldest->active) return NULL;
+  memset(oldest, 0, sizeof(*oldest));
+  snprintf(oldest->client, sizeof(oldest->client), "%s", client);
+  oldest->window_started = now;
+  return oldest;
+}
+
+bool lumen_auth_ws_admit(struct lumen_auth *auth, const char *client) {
+  if (!auth) return true;
+  int64_t now = (int64_t)time(NULL);
+  struct lumen_ws_rate *rate = ws_rate_entry(auth, client, now);
+  if (!rate || rate->active >= auth->max_connections_per_ip) return false;
+  if (now - rate->window_started >= auth->ws_rate_window) {
+    rate->attempts = 0;
+    rate->window_started = now;
+  }
+  rate->attempts++;
+  return rate->attempts <= auth->ws_max_attempts;
+}
+
+void lumen_auth_ws_connected(struct lumen_auth *auth, const char *client) {
+  if (!auth) return;
+  struct lumen_ws_rate *rate = ws_rate_entry(auth, client, (int64_t)time(NULL));
+  if (rate) rate->active++;
+  lumen_auth_audit(auth, "ws_connected", client, "terminal");
+}
+
+void lumen_auth_ws_disconnected(struct lumen_auth *auth, const char *client) {
+  if (!auth) return;
+  struct lumen_ws_rate *rate = ws_rate_entry(auth, client, (int64_t)time(NULL));
+  if (rate && rate->active > 0) rate->active--;
+  lumen_auth_audit(auth, "ws_disconnected", client, "terminal");
+}
+
+static bool totp_secret_valid(const unsigned char *secret, size_t secret_len, const char *code, int64_t now) {
+  if (!secret_len) return true;
+  if (!code || strlen(code) != 6) return false;
+  for (const char *p = code; *p; p++)
+    if (!isdigit((unsigned char)*p)) return false;
+  int supplied = atoi(code);
+  for (int offset = -1; offset <= 1; offset++) {
+    uint64_t counter = (uint64_t)(now / 30 + offset);
+    unsigned char message[8];
+    for (int i = 7; i >= 0; i--) {
+      message[i] = (unsigned char)(counter & 0xff);
+      counter >>= 8;
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int length = 0;
+    if (!HMAC(EVP_sha1(), secret, (int)secret_len, message, sizeof(message), digest, &length) ||
+        length < 20)
+      return false;
+    int index = digest[length - 1] & 0x0f;
+    int expected = ((digest[index] & 0x7f) << 24) | (digest[index + 1] << 16) |
+                   (digest[index + 2] << 8) | digest[index + 3];
+    if (expected % 1000000 == supplied) return true;
+  }
+  return false;
+}
+
+static bool totp_valid(const struct lumen_auth *auth, const char *code, int64_t now) {
+  return totp_secret_valid(auth->totp_secret, auth->totp_secret_len, code, now);
+}
+
+char *lumen_auth_totp_begin(struct lumen_auth *auth, const char *client) {
+  if (!auth || !auth->totp_secret_file[0] || auth->totp_secret_len) return NULL;
+  OPENSSL_cleanse(auth->totp_pending_secret, sizeof(auth->totp_pending_secret));
+  auth->totp_pending_secret_len = 20;
+  auth->totp_pending_expires = (int64_t)time(NULL) + 600;
+  if (RAND_bytes(auth->totp_pending_secret, (int)auth->totp_pending_secret_len) != 1) {
+    auth->totp_pending_secret_len = 0;
+    return NULL;
+  }
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  char encoded[64] = "";
+  unsigned int accumulator = 0, bits = 0;
+  size_t written = 0;
+  for (size_t i = 0; i < auth->totp_pending_secret_len; i++) {
+    accumulator = (accumulator << 8) | auth->totp_pending_secret[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      encoded[written++] = alphabet[(accumulator >> bits) & 31];
+    }
+  }
+  if (bits) encoded[written++] = alphabet[(accumulator << (5 - bits)) & 31];
+  encoded[written] = '\0';
+  char *uri = malloc(1024);
+  if (!uri) return NULL;
+  snprintf(uri, 1024, "otpauth://totp/Lumen:%s?secret=%s&issuer=Lumen&algorithm=SHA1&digits=6&period=30",
+           auth->username, encoded);
+  lumen_auth_audit(auth, "totp_setup_started", client, "authenticator");
+  return uri;
+}
+
+bool lumen_auth_totp_confirm(struct lumen_auth *auth, const char *client, const char *code) {
+  int64_t now = (int64_t)time(NULL);
+  if (!auth || auth->totp_secret_len || !auth->totp_pending_secret_len || auth->totp_pending_expires < now ||
+      !totp_secret_valid(auth->totp_pending_secret, auth->totp_pending_secret_len, code, now))
+    return false;
+  static const char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  char encoded[128] = "";
+  unsigned int accumulator = 0, bits = 0;
+  size_t written = 0;
+  for (size_t i = 0; i < auth->totp_pending_secret_len; i++) {
+    accumulator = (accumulator << 8) | auth->totp_pending_secret[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      encoded[written++] = alphabet[(accumulator >> bits) & 31];
+    }
+  }
+  if (bits) encoded[written++] = alphabet[(accumulator << (5 - bits)) & 31];
+  encoded[written] = '\0';
+  FILE *file = fopen(auth->totp_secret_file, "w");
+  if (!file) return false;
+  chmod(auth->totp_secret_file, 0600);
+  fprintf(file, "%s\n", encoded);
+  if (fclose(file) != 0) return false;
+  memcpy(auth->totp_secret, auth->totp_pending_secret, auth->totp_pending_secret_len);
+  auth->totp_secret_len = auth->totp_pending_secret_len;
+  OPENSSL_cleanse(auth->totp_pending_secret, sizeof(auth->totp_pending_secret));
+  auth->totp_pending_secret_len = 0;
+  auth->totp_pending_expires = 0;
+  lumen_auth_audit(auth, "totp_enabled", client, "authenticator");
+  return true;
+}
+
+bool lumen_auth_totp_remove(struct lumen_auth *auth, const char *client, const char *code) {
+  int64_t now = (int64_t)time(NULL);
+  if (!auth || !auth->totp_secret_len || !totp_valid(auth, code, now)) return false;
+  if (unlink(auth->totp_secret_file) != 0 && errno != ENOENT) return false;
+  OPENSSL_cleanse(auth->totp_secret, sizeof(auth->totp_secret));
+  auth->totp_secret_len = 0;
+  lumen_auth_audit(auth, "totp_removed", client, "authenticator");
+  return true;
+}
+
+bool lumen_auth_totp_enabled(struct lumen_auth *auth) {
+  return auth && auth->totp_secret_len > 0;
 }
 
 static struct lumen_login_rate *rate_entry(struct lumen_auth *auth, const char *client, int64_t now) {
@@ -467,7 +765,7 @@ static struct lumen_login_rate *rate_entry(struct lumen_auth *auth, const char *
 }
 
 enum lumen_login_result lumen_auth_login(struct lumen_auth *auth, const char *client, const char *username,
-                                         const char *password, int64_t *retry_after) {
+                                         const char *password, const char *totp, int64_t *retry_after) {
   if (!auth || auth->mode != LUMEN_AUTH_SESSION) return LUMEN_LOGIN_ERROR;
   int64_t now = (int64_t)time(NULL);
   struct lumen_login_rate *rate = rate_entry(auth, client, now);
@@ -494,8 +792,10 @@ enum lumen_login_result lumen_auth_login(struct lumen_auth *auth, const char *cl
   bool password_valid = password_length_valid && CRYPTO_memcmp(candidate, auth->password_hash, sizeof(candidate)) == 0;
   OPENSSL_cleanse(candidate, sizeof(candidate));
 
-  if (username_valid && password_valid) {
+  bool totp_code_valid = totp_valid(auth, totp, now);
+  if (username_valid && password_valid && totp_code_valid) {
     memset(rate, 0, sizeof(*rate));
+    save_rates(auth);
     return LUMEN_LOGIN_OK;
   }
 
@@ -508,7 +808,10 @@ enum lumen_login_result lumen_auth_login(struct lumen_auth *auth, const char *cl
     rate->locked_until = now + delay;
     *retry_after = delay;
   }
-  return LUMEN_LOGIN_INVALID;
+  save_rates(auth);
+  return username_valid && password_valid && auth->totp_secret_len
+             ? LUMEN_LOGIN_TOTP_INVALID
+             : LUMEN_LOGIN_INVALID;
 }
 
 static int make_cookie_header(struct lumen_auth *auth, const char *name, const char *value, int64_t max_age,

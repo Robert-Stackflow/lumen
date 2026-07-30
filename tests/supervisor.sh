@@ -44,6 +44,8 @@ done
 
 LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list |
   grep -q '^test '
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list-json |
+  python3 -c 'import json,sys; rows=json.load(sys.stdin); assert rows[0]["id"] == "test"; assert rows[0]["clients"] >= 0'
 
 replay_seen="false"
 for _ in {1..60}; do

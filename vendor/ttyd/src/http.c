@@ -1,11 +1,13 @@
 #include <libwebsockets.h>
 #include <openssl/crypto.h>
+#include <qrencode.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <zlib.h>
 
@@ -17,6 +19,7 @@ enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
 
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
+static time_t http_started_at;
 
 static const char security_headers[] =
     "Cache-Control: no-store\r\n"
@@ -94,6 +97,7 @@ static int send_text(struct lws *wsi, struct pss_http *pss, unsigned int status,
   pss->buffer = pss->ptr = body;
   pss->len = body_len;
   pss->owns_buffer = owns_body;
+  pss->response_pending = true;
   lws_callback_on_writable(wsi);
   return 0;
 }
@@ -167,6 +171,7 @@ static void pss_buffer_free(struct pss_http *pss) {
   pss->ptr = NULL;
   pss->len = 0;
   pss->owns_buffer = false;
+  pss->response_pending = false;
 }
 
 static void pss_cookies_free(struct pss_http *pss) {
@@ -215,10 +220,10 @@ static bool valid_session_id(const char *session_id) {
   return true;
 }
 
-static bool terminate_request_valid(struct lws *wsi) {
+static bool action_request_valid(struct lws *wsi, const char *expected_action) {
   char action[32] = "", origin[512] = "", host[256] = "";
   if (lws_hdr_custom_copy(wsi, action, sizeof(action), "x-lumen-action:", 15) <= 0 ||
-      strcmp(action, "terminate"))
+      strcmp(action, expected_action))
     return false;
   lws_hdr_copy(wsi, origin, sizeof(origin), WSI_TOKEN_ORIGIN);
   lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST);
@@ -253,10 +258,143 @@ static int terminate_session(const char *session_id) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+static int disconnect_client(const char *connection_id) {
+  pid_t pid = fork();
+  if (pid < 0) return -1;
+  if (pid == 0) {
+    execl(server->command, server->command, "--disconnect", connection_id, (char *)NULL);
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static char *list_sessions(size_t *output_len) {
+  int fds[2];
+  if (pipe(fds) != 0) return NULL;
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(fds[0]);
+    close(fds[1]);
+    return NULL;
+  }
+  if (pid == 0) {
+    close(fds[0]);
+    if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
+    close(fds[1]);
+    execl(server->command, server->command, "--list-json", (char *)NULL);
+    _exit(127);
+  }
+  close(fds[1]);
+  size_t used = 0, capacity = 4096;
+  char *body = malloc(capacity);
+  if (!body) {
+    close(fds[0]);
+    waitpid(pid, NULL, 0);
+    return NULL;
+  }
+  for (;;) {
+    if (used == capacity) {
+      if (capacity >= 65536) break;
+      capacity *= 2;
+      char *next = realloc(body, capacity);
+      if (!next) break;
+      body = next;
+    }
+    ssize_t count = read(fds[0], body + used, capacity - used);
+    if (count > 0) {
+      used += (size_t)count;
+      continue;
+    }
+    if (count < 0 && errno == EINTR) continue;
+    break;
+  }
+  close(fds[0]);
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 || used == 0 || used > 65536) {
+    free(body);
+    return NULL;
+  }
+  *output_len = used;
+  return body;
+}
+
+static char *replace_template_token(char *source, const char *token, const char *value) {
+  size_t source_len = strlen(source), token_len = strlen(token), value_len = strlen(value), count = 0;
+  for (char *p = source; (p = strstr(p, token)); p += token_len) count++;
+  if (!count) return source;
+  size_t output_len = source_len - count * token_len + count * value_len;
+  char *output = xmalloc(output_len + 1), *target = output;
+  const char *cursor = source, *match;
+  while ((match = strstr(cursor, token))) {
+    size_t prefix = (size_t)(match - cursor);
+    memcpy(target, cursor, prefix);
+    target += prefix;
+    memcpy(target, value, value_len);
+    target += value_len;
+    cursor = match + token_len;
+  }
+  strcpy(target, cursor);
+  free(source);
+  return output;
+}
+
+static char *render_login_file(const char *csrf, const char *message, bool locked,
+                               size_t *output_len) {
+  const char *path = getenv("LUMEN_LOGIN_TEMPLATE");
+  if (!path || !path[0]) return NULL;
+  FILE *file = fopen(path, "rb");
+  if (!file) return NULL;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  long length = ftell(file);
+  if (length <= 0 || length > 131072 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  char *page = xmalloc((size_t)length + 1);
+  if (fread(page, 1, (size_t)length, file) != (size_t)length) {
+    fclose(file);
+    free(page);
+    return NULL;
+  }
+  fclose(file);
+  page[length] = '\0';
+  const char *totp_field = lumen_auth_totp_enabled(server->auth)
+                               ? "<label for=\"totp\">动态验证码</label><input id=\"totp\" name=\"totp\" "
+                                 "type=\"text\" autocomplete=\"one-time-code\" inputmode=\"numeric\" "
+                                 "pattern=\"[0-9]{6}\" maxlength=\"6\" placeholder=\"输入 6 位动态码\">"
+                               : "<input name=\"totp\" type=\"hidden\" value=\"\">";
+  page = replace_template_token(page, "{{BASE_PATH}}", endpoints.parent);
+  page = replace_template_token(page, "{{CSRF}}", csrf);
+  page = replace_template_token(page, "{{TOTP_FIELD}}", totp_field);
+  page = replace_template_token(page, "{{ERROR_CLASS}}", message && *message ? " error-visible" : "");
+  page = replace_template_token(page, "{{ERROR_MESSAGE}}", message ? message : "");
+  page = replace_template_token(page, "{{BUTTON_DISABLED}}", locked ? " disabled" : "");
+  page = replace_template_token(page, "{{BUTTON_TEXT}}", locked ? "请稍后重试" : "登录");
+  page = replace_template_token(page, "{{PASSKEY_HIDDEN}}",
+                                lumen_auth_has_passkeys(server->auth) ? "" : " hidden");
+  *output_len = strlen(page);
+  return page;
+}
+
 static char *render_login(const char *csrf, const char *message, bool locked, size_t *output_len) {
+  char *external = render_login_file(csrf, message, locked, output_len);
+  if (external) return external;
   const char *error_class = message && *message ? " error-visible" : "";
   const char *button = locked ? "请稍后重试" : "登录";
   const char *disabled = locked ? " disabled" : "";
+  const char *totp_field = lumen_auth_totp_enabled(server->auth)
+                               ? "<label for=\"totp\">动态验证码</label><input id=\"totp\" name=\"totp\" "
+                                 "type=\"text\" autocomplete=\"one-time-code\" inputmode=\"numeric\" "
+                                 "pattern=\"[0-9]{6}\" maxlength=\"6\" placeholder=\"输入 6 位动态码\">"
+                               : "<input name=\"totp\" type=\"hidden\" value=\"\">";
   const char *template =
       "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
@@ -264,11 +402,11 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "<title>登录 · Lumen</title><style>"
       ":root{color-scheme:dark;--bg:#10111a;--card:#191925;--field:#1d1d2b;--hover:#242435;"
       "--line:rgba(205,214,244,.11);--text:#cdd6f4;--strong:#eef1fb;--muted:#8b90a7;--green:#a6e3a1;"
-      "--blue:#89b4fa;--red:#f38ba8;--shadow:rgba(0,0,0,.36)}"
+      "--blue:#89b4fa;--red:#f38ba8;--button-text:#151722;--shadow:rgba(0,0,0,.36)}"
       "@media(prefers-color-scheme:light){:root{color-scheme:light;--bg:#eff1f5;--card:#e8ebf1;--field:#dfe3eb;"
       "--hover:#dce0e8;--line:rgba(76,79,105,.14);--text:#4c4f69;--strong:#303247;--muted:#6c6f85;"
-      "--green:#40a02b;--blue:#1e66f5;--red:#d20f39;--shadow:rgba(76,79,105,.15)}}"
-      "*{box-sizing:border-box}body{position:relative;margin:0;min-height:100dvh;display:grid;place-items:center;"
+      "--green:#40a02b;--blue:#1e66f5;--red:#d20f39;--button-text:#fff;--shadow:rgba(76,79,105,.15)}}"
+      "*{box-sizing:border-box}[hidden]{display:none!important}body{position:relative;margin:0;min-height:100dvh;display:grid;place-items:center;"
       "overflow:hidden;padding:24px;background:var(--bg);color:var(--text);font-family:ui-sans-serif,-apple-system,"
       "BlinkMacSystemFont,\"Segoe UI\",sans-serif;-webkit-font-smoothing:antialiased}body:before{content:\"\";"
       "position:fixed;z-index:0;top:-220px;left:50%%;width:min(760px,90vw);height:420px;border-radius:50%%;"
@@ -296,7 +434,8 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "background-color .14s}input:hover{background:var(--hover)}input:focus{border-color:var(--blue);background:"
       "var(--field);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 16%%,transparent)}button{width:100%%;"
       "height:44px;border:1px solid color-mix(in srgb,var(--green) 70%%,transparent);border-radius:10px;"
-      "background:var(--green);color:#10111a;font-size:13px;font-weight:720;cursor:pointer;box-shadow:0 8px 24px "
+      "background:var(--green);color:var(--button-text);font-size:13px;font-weight:700;letter-spacing:.01em;"
+      "cursor:pointer;box-shadow:0 8px 24px "
       "color-mix(in srgb,var(--green) 12%%,transparent);transition:filter .14s,transform .1s}button:hover{filter:"
       "brightness(1.045)}button:active{transform:scale(.992)}button:disabled{opacity:.55;cursor:not-allowed}.error{"
       "display:none;margin:-2px 0 17px;padding:10px 11px;border:1px solid color-mix(in srgb,var(--red) 28%%,"
@@ -312,15 +451,29 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "value=\"%s\"><label for=\"username\">账号</label><input id=\"username\" name=\"username\" type=\"text\" "
       "autocomplete=\"username\" autocapitalize=\"none\" spellcheck=\"false\" maxlength=\"64\" required "
       "autofocus><label for=\"password\">密码</label><input id=\"password\" name=\"password\" type=\"password\" "
-      "autocomplete=\"current-password\" maxlength=\"128\" required><div class=\"error%s\" role=\"alert\">%s"
-      "</div><button type=\"submit\"%s>%s</button></form></section><div class=\"note\">安全会话仅保存在当前浏览器"
-      " · Lumen 不会保存明文密码</div></main></body></html>";
+      "autocomplete=\"current-password\" maxlength=\"128\" required>%s<div class=\"error%s\" role=\"alert\">%s"
+      "</div>"
+      "<button type=\"submit\"%s>%s</button></form><button id=\"passkey\"%s type=\"button\" style=\"margin-top:10px;"
+      "background:transparent;color:var(--strong);border-color:var(--line);box-shadow:none\">使用通行密钥</button>"
+      "</section><div class=\"note\">安全会话仅保存在当前浏览器 · Lumen 不会保存明文密码</div></main>"
+      "<script>const cv=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/').padEnd("
+      "s.length+(4-s.length%%4)%%4,'=')),c=>c.charCodeAt(0));const vc=b=>btoa(String.fromCharCode(...new "
+      "Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');document.getElementById("
+      "'passkey').onclick=async()=>{try{const o=await fetch('%s/auth/passkey/options',{credentials:'same-origin'}"
+      ").then(r=>r.json());o.challenge=cv(o.challenge);o.allowCredentials=o.allowCredentials.map(x=>({...x,id:"
+      "cv(x.id)}));const c=await navigator.credentials.get({publicKey:o});const body={id:vc(c.rawId),clientDataJSON:"
+      "vc(c.response.clientDataJSON),authenticatorData:vc(c.response.authenticatorData),signature:vc(c.response."
+      "signature)};const r=await fetch('%s/auth/passkey/login',{method:'POST',credentials:'same-origin',headers:{"
+      "'Content-Type':'application/json'},body:JSON.stringify(body)});if(r.ok||r.status===303)location.href='%s/';"
+      "else throw Error();}catch(e){alert('通行密钥验证失败，请重试。')}};</script></body></html>";
 
-  size_t needed = strlen(template) + strlen(endpoints.parent) + strlen(csrf) + strlen(error_class) +
-                  (message ? strlen(message) : 0) + strlen(disabled) + strlen(button) + 64;
+  size_t needed = strlen(template) + strlen(endpoints.parent) + strlen(csrf) + strlen(totp_field) + strlen(error_class) +
+                  (message ? strlen(message) : 0) + strlen(disabled) + strlen(button) +
+                  strlen(endpoints.parent) * 3 + 256;
   char *output = xmalloc(needed);
-  int written = snprintf(output, needed, template, endpoints.parent, csrf, error_class, message ? message : "",
-                         disabled, button);
+  const char *passkey_visibility = lumen_auth_has_passkeys(server->auth) ? "" : " hidden";
+  int written = snprintf(output, needed, template, endpoints.parent, csrf, totp_field, error_class, message ? message : "",
+                         disabled, button, passkey_visibility, endpoints.parent, endpoints.parent, endpoints.parent);
   if (written < 0 || (size_t)written >= needed) {
     free(output);
     return NULL;
@@ -393,12 +546,13 @@ static bool csrf_valid(struct pss_http *pss, const char *submitted, bool *cookie
 }
 
 static int complete_login(struct lws *wsi, struct pss_http *pss) {
-  char username[65] = "", password[129] = "", csrf[65] = "";
+  char username[65] = "", password[129] = "", totp[7] = "", csrf[65] = "";
   bool body_valid = pss->buffer && pss->body_len <= 2048;
   bool username_valid = body_valid && form_value(pss->buffer, "username", username, sizeof(username));
   bool password_valid = body_valid && form_value(pss->buffer, "password", password, sizeof(password));
+  bool totp_valid = body_valid && form_value(pss->buffer, "totp", totp, sizeof(totp));
   bool submitted_csrf_valid = body_valid && form_value(pss->buffer, "csrf", csrf, sizeof(csrf));
-  bool parsed = username_valid && password_valid && submitted_csrf_valid;
+  bool parsed = username_valid && password_valid && totp_valid && submitted_csrf_valid;
   bool cookie_found = false, token_matches = false, origin_matches = false;
   bool request_valid =
       parsed && csrf_valid(pss, csrf, &cookie_found, &token_matches, &origin_matches);
@@ -407,7 +561,8 @@ static int complete_login(struct lws *wsi, struct pss_http *pss) {
 
   int64_t retry_after = 0;
   enum lumen_login_result result = request_valid
-                                       ? lumen_auth_login(server->auth, pss->client, username, password, &retry_after)
+                                       ? lumen_auth_login(server->auth, pss->client, username, password, totp,
+                                                          &retry_after)
                                        : LUMEN_LOGIN_ERROR;
   if (pss->buffer) {
     OPENSSL_cleanse(pss->buffer, pss->body_len);
@@ -429,14 +584,93 @@ static int complete_login(struct lws *wsi, struct pss_http *pss) {
         lumen_auth_clear_csrf_cookie(server->auth, csrf_cookie, sizeof(csrf_cookie)) < 0)
       return 1;
     lwsl_notice("LOGIN success - %s\n", pss->client);
+    lumen_auth_audit(server->auth, "login_success", pss->client, "session");
     return send_empty(wsi, HTTP_STATUS_SEE_OTHER, endpoints.index, session_cookie, csrf_cookie);
   }
   if (result == LUMEN_LOGIN_LOCKED) {
     lwsl_warn("LOGIN locked - %s\n", pss->client);
+    lumen_auth_audit(server->auth, "login_locked", pss->client, "rate-limit");
     return serve_login(wsi, pss, 429, "尝试次数过多，请稍后再试。", true, retry_after);
   }
   lwsl_warn("LOGIN failed - %s\n", pss->client);
-  return serve_login(wsi, pss, HTTP_STATUS_UNAUTHORIZED, "账号或密码不正确。", false, retry_after);
+  const bool totp_failed = result == LUMEN_LOGIN_TOTP_INVALID;
+  lumen_auth_audit(server->auth, "login_failed", pss->client, totp_failed ? "totp" : "credentials");
+  return serve_login(wsi, pss, HTTP_STATUS_UNAUTHORIZED,
+                     totp_failed ? "动态验证码不正确，请重新输入。" : "账号或密码不正确，请重试。",
+                     false, retry_after);
+}
+
+static int complete_passkey(struct lws *wsi, struct pss_http *pss, bool registration) {
+  bool ok = pss->buffer && pss->body_len <= 16384 &&
+            (registration ? lumen_auth_passkey_register(server->auth, pss->client, pss->buffer)
+                          : lumen_auth_passkey_login(server->auth, pss->client, pss->buffer));
+  if (pss->buffer) {
+    OPENSSL_cleanse(pss->buffer, pss->body_len);
+    pss_buffer_free(pss);
+  }
+  if (!ok) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+  if (registration) return send_empty(wsi, 204, NULL, NULL, NULL);
+  char session_cookie[512];
+  if (lumen_auth_new_session_cookie(server->auth, session_cookie, sizeof(session_cookie)) < 0) return 1;
+  return send_empty(wsi, HTTP_STATUS_SEE_OTHER, endpoints.index, session_cookie, NULL);
+}
+
+static int complete_totp_confirm(struct lws *wsi, struct pss_http *pss) {
+  char code[7] = "";
+  bool valid = pss->buffer && pss->body_len <= 256 && form_value(pss->buffer, "code", code, sizeof(code)) &&
+               lumen_auth_totp_confirm(server->auth, pss->client, code);
+  if (pss->buffer) {
+    OPENSSL_cleanse(pss->buffer, pss->body_len);
+    pss_buffer_free(pss);
+  }
+  OPENSSL_cleanse(code, sizeof(code));
+  return send_empty(wsi, valid ? 204 : HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+}
+
+static int complete_passkey_rename(struct lws *wsi, struct pss_http *pss) {
+  char prefix[128], name[64] = "";
+  endpoint_path(prefix, sizeof(prefix), "api/passkeys/");
+  const char *credential_id = !strncmp(pss->path, prefix, strlen(prefix)) ? pss->path + strlen(prefix) : "";
+  bool valid = pss->buffer && pss->body_len <= 512 && form_value(pss->buffer, "name", name, sizeof(name)) &&
+               lumen_auth_passkey_rename(server->auth, pss->client, credential_id, name);
+  if (pss->buffer) {
+    OPENSSL_cleanse(pss->buffer, pss->body_len);
+    pss_buffer_free(pss);
+  }
+  return send_empty(wsi, valid ? 204 : HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+}
+
+static int complete_preferences(struct lws *wsi, struct pss_http *pss) {
+  bool saved = pss->buffer && pss->body_len <= 131072 &&
+               lumen_auth_preferences_set(server->auth, pss->buffer);
+  pss_buffer_free(pss);
+  return send_empty(wsi, saved ? 204 : HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+}
+
+static char *totp_setup_json(const char *uri) {
+  QRcode *code = QRcode_encodeString(uri, 0, QR_ECLEVEL_M, QR_MODE_8, 1);
+  if (!code || code->width <= 0 || code->width > 128) {
+    QRcode_free(code);
+    return NULL;
+  }
+  size_t needed = strlen(uri) + (size_t)code->width * ((size_t)code->width + 4) + 64;
+  char *json = malloc(needed);
+  if (!json) {
+    QRcode_free(code);
+    return NULL;
+  }
+  char *cursor = json;
+  cursor += sprintf(cursor, "{\"uri\":\"%s\",\"matrix\":[", uri);
+  for (int row = 0; row < code->width; row++) {
+    if (row) *cursor++ = ',';
+    *cursor++ = '"';
+    for (int column = 0; column < code->width; column++)
+      *cursor++ = code->data[row * code->width + column] & 1 ? '1' : '0';
+    *cursor++ = '"';
+  }
+  memcpy(cursor, "]}", 3);
+  QRcode_free(code);
+  return json;
 }
 
 int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
@@ -452,18 +686,111 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       memset(pss, 0, sizeof(*pss));
       access_log(wsi, (const char *)in);
       snprintf(pss->path, sizeof(pss->path), "%s", (const char *)in);
+      if (!http_started_at) http_started_at = time(NULL);
 
-      char login_path[128], login_action[128], session_api[128];
+      char login_path[128], login_action[128], logout_action[128], passkey_options[128], passkey_login[128],
+          passkeys_api[128], passkey_api[128], passkey_register_options[128], passkey_register[128],
+          preferences_api[128], totp_api[128], totp_setup[128], totp_confirm[128], session_api[128],
+          sessions_api[128], health_api[128], healthz[128];
       endpoint_path(login_path, sizeof(login_path), "login");
       endpoint_path(login_action, sizeof(login_action), "auth/login");
+      endpoint_path(logout_action, sizeof(logout_action), "auth/logout");
+      endpoint_path(passkey_options, sizeof(passkey_options), "auth/passkey/options");
+      endpoint_path(passkey_login, sizeof(passkey_login), "auth/passkey/login");
+      endpoint_path(passkeys_api, sizeof(passkeys_api), "api/passkeys");
+      endpoint_path(passkey_api, sizeof(passkey_api), "api/passkeys/");
+      endpoint_path(passkey_register_options, sizeof(passkey_register_options), "api/passkeys/register/options");
+      endpoint_path(passkey_register, sizeof(passkey_register), "api/passkeys/register");
+      endpoint_path(preferences_api, sizeof(preferences_api), "api/preferences");
+      endpoint_path(totp_setup, sizeof(totp_setup), "api/totp/setup");
+      endpoint_path(totp_api, sizeof(totp_api), "api/totp");
+      endpoint_path(totp_confirm, sizeof(totp_confirm), "api/totp/confirm");
       endpoint_path(session_api, sizeof(session_api), "api/sessions/");
+      endpoint_path(sessions_api, sizeof(sessions_api), "api/sessions");
+      endpoint_path(health_api, sizeof(health_api), "api/health");
+      endpoint_path(healthz, sizeof(healthz), "healthz");
       char *uri = NULL;
       int uri_len = 0;
       int method = lws_http_get_uri_and_method(wsi, &uri, &uri_len);
 
+      if (!strcmp(pss->path, healthz)) {
+        if (method != LWSHUMETH_GET)
+          return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        char *body = strdup("{\"status\":\"ok\"}");
+        return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                                body, strlen(body), true, NULL, 0)
+                    : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+      }
+      if (!strcmp(pss->path, health_api)) {
+        if (method != LWSHUMETH_GET)
+          return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        int auth_result = check_auth(wsi);
+        if (auth_result != AUTH_OK)
+          return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        size_t inventory_len = 0;
+        char *inventory = list_sessions(&inventory_len);
+        if (!inventory) return send_empty(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL, NULL, NULL);
+        unsigned int sessions = 0, connections = 0;
+        for (char *cursor = inventory; (cursor = strstr(cursor, "\"pid\":")); cursor += 6) sessions++;
+        for (char *cursor = inventory; (cursor = strstr(cursor, "\"clients\":")); cursor += 10)
+          connections += (unsigned int)strtoul(cursor + 10, NULL, 10);
+        free(inventory);
+        char *body = malloc(256);
+        if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        int written = snprintf(body, 256,
+                               "{\"status\":\"ok\",\"version\":\"%s\",\"uptimeSeconds\":%lld,"
+                               "\"sessions\":%u,\"connections\":%u}",
+                               TTYD_VERSION, (long long)(time(NULL) - http_started_at),
+                               sessions, connections);
+        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                         body, (size_t)written, true, NULL, 0);
+      }
+
       size_t session_api_len = strlen(session_api);
+      if (!strcmp(pss->path, sessions_api)) {
+        if (method != LWSHUMETH_GET)
+          return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        int auth_result = check_auth(wsi);
+        if (auth_result != AUTH_OK) {
+          if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION)
+            return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          return auth_result == AUTH_FAIL ? 0 : 1;
+        }
+        size_t body_len = 0;
+        char *body = list_sessions(&body_len);
+        if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                         body, body_len, true, NULL, 0);
+      }
       if (!strncmp(pss->path, session_api, session_api_len)) {
         const char *session_id = pss->path + session_api_len;
+        const char *connections = strstr(session_id, "/connections/");
+        if (connections) {
+          size_t id_len = (size_t)(connections - session_id);
+          const char *connection_id = connections + strlen("/connections/");
+          char id[33] = "";
+          if (id_len == 0 || id_len >= sizeof(id) || !connection_id[0])
+            return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+          memcpy(id, session_id, id_len);
+          for (const char *p = connection_id; *p; p++)
+            if (*p < '0' || *p > '9') return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+          if (!valid_session_id(id) || method != LWSHUMETH_POST)
+            return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          int auth_result = check_auth(wsi);
+          if (auth_result != AUTH_OK)
+            return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "disconnect"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          int result = disconnect_client(connection_id);
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          if (result == 0) {
+            lumen_auth_audit(server->auth, "connection_disconnected", client, id);
+            return send_empty(wsi, 204, NULL, NULL, NULL);
+          }
+          if (result == 3) return send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
+          return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
         if (method != LWSHUMETH_POST)
           return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
         if (!valid_session_id(session_id)) return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
@@ -474,13 +801,15 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
           return auth_result == AUTH_FAIL ? 0 : 1;
         }
-        if (!terminate_request_valid(wsi)) return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        if (!action_request_valid(wsi, "terminate"))
+          return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
 
         int result = terminate_session(session_id);
         char client[64] = "";
         lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
         if (result == 0) {
           lwsl_notice("SESSION terminated %s - %s\n", session_id, client);
+          lumen_auth_audit(server->auth, "session_terminated", client, session_id);
           return send_empty(wsi, 204, NULL, NULL, NULL);
         }
         if (result == 3) return send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
@@ -496,6 +825,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         if (!strcmp(pss->path, login_action)) {
           if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
           pss->login_post = true;
+          pss->auth_action = 1;
           if (!copy_cookie_header(wsi, pss)) {
             lwsl_warn("LOGIN rejected oversized or unreadable Cookie header\n");
             return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
@@ -504,6 +834,166 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
           lws_hdr_copy(wsi, pss->host, sizeof(pss->host), WSI_TOKEN_HOST);
           lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
           return 0;
+        }
+
+        if (!strcmp(pss->path, passkey_options)) {
+          if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (!lumen_auth_has_passkeys(server->auth))
+            return send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          char *body = lumen_auth_passkey_options(server->auth, client, false);
+          return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body),
+                                  true, NULL, 0)
+                      : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
+
+        if (!strcmp(pss->path, passkey_login)) {
+          if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          pss->login_post = true;
+          pss->auth_action = 2;
+          lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+          return 0;
+        }
+
+        if (!strcmp(pss->path, passkey_register_options)) {
+          if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          char *body = lumen_auth_passkey_options(server->auth, client, true);
+          return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body),
+                                  true, NULL, 0)
+                      : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
+
+        if (!strcmp(pss->path, passkeys_api)) {
+          if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          char *body = lumen_auth_passkey_list(server->auth);
+          return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body),
+                                  true, NULL, 0)
+                      : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
+
+        size_t passkey_api_len = strlen(passkey_api);
+        if (strcmp(pss->path, passkey_register) && !strncmp(pss->path, passkey_api, passkey_api_len)) {
+          const char *credential_id = pss->path + passkey_api_len;
+          if (method != LWSHUMETH_DELETE && method != LWSHUMETH_PATCH)
+            return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (!*credential_id || strlen(credential_id) > 700)
+            return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (method == LWSHUMETH_PATCH) {
+            if (!action_request_valid(wsi, "passkey-rename"))
+              return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+            pss->login_post = true;
+            pss->auth_action = 5;
+            lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+            return 0;
+          }
+          if (!action_request_valid(wsi, "passkey-delete"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          return lumen_auth_passkey_delete(server->auth, client, credential_id)
+                     ? send_empty(wsi, 204, NULL, NULL, NULL)
+                     : send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
+        }
+
+        if (!strcmp(pss->path, passkey_register)) {
+          if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "passkey-register"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          pss->login_post = true;
+          pss->auth_action = 3;
+          lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+          return 0;
+        }
+
+        if (!strcmp(pss->path, totp_setup)) {
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (method == LWSHUMETH_GET) {
+            const char *body = lumen_auth_totp_enabled(server->auth) ? "{\"enabled\":true}" : "{\"enabled\":false}";
+            return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", strdup(body), strlen(body),
+                             true, NULL, 0);
+          }
+          if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "totp-setup"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          if (lumen_auth_totp_enabled(server->auth)) {
+            const char *body = "{\"enabled\":true,\"alreadyEnabled\":true}";
+            return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", strdup(body), strlen(body),
+                             true, NULL, 0);
+          }
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          char *uri = lumen_auth_totp_begin(server->auth, client);
+          if (!uri) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+          char *body = totp_setup_json(uri);
+          free(uri);
+          if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+          return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body), true,
+                           NULL, 0);
+        }
+
+        if (!strcmp(pss->path, preferences_api)) {
+          if (method != LWSHUMETH_GET && method != LWSHUMETH_PUT)
+            return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (method == LWSHUMETH_GET) {
+            char *body = lumen_auth_preferences_get(server->auth);
+            return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body),
+                                    true, NULL, 0)
+                        : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+          }
+          if (!action_request_valid(wsi, "preferences-update"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          pss->login_post = true;
+          pss->auth_action = 6;
+          return 0;
+        }
+
+        if (!strcmp(pss->path, totp_confirm)) {
+          if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "totp-confirm"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          pss->login_post = true;
+          pss->auth_action = 4;
+          lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+          return 0;
+        }
+
+        if (!strcmp(pss->path, totp_api)) {
+          if (method != LWSHUMETH_DELETE)
+            return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "totp-remove"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          char client[64] = "", code[7] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          int copied = lws_hdr_custom_copy(wsi, code, sizeof(code), "x-lumen-totp-code:",
+                                           strlen("x-lumen-totp-code:"));
+          bool removed = copied == 6 && lumen_auth_totp_remove(server->auth, client, code);
+          OPENSSL_cleanse(code, sizeof(code));
+          return send_empty(wsi, removed ? 204 : HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        }
+
+        if (!strcmp(pss->path, logout_action)) {
+          if (method != LWSHUMETH_POST)
+            return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+          if (check_auth(wsi) != AUTH_OK)
+            return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+          if (!action_request_valid(wsi, "logout"))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          char session_cookie[512];
+          if (lumen_auth_clear_session_cookie(server->auth, session_cookie, sizeof(session_cookie)) < 0) return 1;
+          char client[64] = "";
+          lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+          lumen_auth_audit(server->auth, "logout", client, "session");
+          return send_empty(wsi, HTTP_STATUS_SEE_OTHER, login_path, session_cookie, NULL);
         }
 
         if (!strcmp(pss->path, login_path)) {
@@ -584,8 +1074,9 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
     }
 
     case LWS_CALLBACK_HTTP_BODY:
+      if (pss->response_pending) return 0;
       if (!pss->login_post) return 1;
-      if (pss->body_len + len > 2048) {
+      if (pss->body_len + len > (pss->auth_action == 1 ? 2048U : 16384U)) {
         pss->body_len += len;
         return 0;
       }
@@ -597,8 +1088,15 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       return 0;
 
     case LWS_CALLBACK_HTTP_BODY_COMPLETION:
+      if (pss->response_pending) return 0;
       if (!pss->login_post) return 1;
-      return complete_login(wsi, pss);
+      if (pss->auth_action == 1) return complete_login(wsi, pss);
+      if (pss->auth_action == 2) return complete_passkey(wsi, pss, false);
+      if (pss->auth_action == 3) return complete_passkey(wsi, pss, true);
+      if (pss->auth_action == 4) return complete_totp_confirm(wsi, pss);
+      if (pss->auth_action == 5) return complete_passkey_rename(wsi, pss);
+      if (pss->auth_action == 6) return complete_preferences(wsi, pss);
+      return 1;
 
     case LWS_CALLBACK_HTTP_WRITEABLE:
       if (!pss->buffer || pss->len == 0) goto try_to_reuse;
@@ -611,13 +1109,15 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         } else if (m != -1 && m < n) {
           n = m;
         }
-        if (pss->ptr + n > pss->buffer + pss->len) {
-          n = (int)(pss->len - (pss->ptr - pss->buffer));
+        size_t remaining = pss->len - (size_t)(pss->ptr - pss->buffer);
+        if ((size_t)n >= remaining) {
+          n = (int)remaining;
           done = true;
         }
         memcpy(buffer + LWS_PRE, pss->ptr, n);
         pss->ptr += n;
-        if (lws_write_http(wsi, buffer + LWS_PRE, (size_t)n) < n) {
+        enum lws_write_protocol protocol = done ? LWS_WRITE_HTTP_FINAL : LWS_WRITE_HTTP;
+        if (lws_write(wsi, buffer + LWS_PRE, (size_t)n, protocol) < n) {
           pss_buffer_free(pss);
           return -1;
         }

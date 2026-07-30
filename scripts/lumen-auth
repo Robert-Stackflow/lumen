@@ -29,6 +29,14 @@ KEY_ORDER = (
     "login_max_failures",
     "login_window_seconds",
     "login_lockout_seconds",
+    "rate_limit_state",
+    "audit_log",
+    "passkey_store",
+    "totp_secret_file",
+    "preferences_file",
+    "max_connections_per_ip",
+    "ws_max_attempts",
+    "ws_rate_window_seconds",
 )
 
 
@@ -108,6 +116,14 @@ def init(args: argparse.Namespace) -> None:
         "login_max_failures": "5",
         "login_window_seconds": "300",
         "login_lockout_seconds": "300",
+        "rate_limit_state": str(args.state_dir / "login-rates"),
+        "audit_log": str(args.state_dir / "security-audit.log"),
+        "passkey_store": str(args.state_dir / "passkeys"),
+        "totp_secret_file": str(args.state_dir / "totp-secret"),
+        "preferences_file": str(args.state_dir / "preferences.json"),
+        "max_connections_per_ip": "4",
+        "ws_max_attempts": "20",
+        "ws_rate_window_seconds": "60",
     }
     write_config(args.config, values)
     print(f"Username: {args.username}")
@@ -161,7 +177,8 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     create.add_argument("--username", required=True)
     create.add_argument("--host", required=True)
-    create.add_argument("--session-days", type=int, default=180)
+    create.add_argument("--session-days", type=int, default=30)
+    create.add_argument("--state-dir", type=Path, required=True)
     create.add_argument("--client-ip-header", default="")
     create.add_argument("--insecure-cookie", action="store_true")
     create.add_argument("--force", action="store_true")

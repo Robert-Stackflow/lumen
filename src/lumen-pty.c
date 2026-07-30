@@ -40,6 +40,8 @@ enum message_type {
     MSG_RESIZE = 3,
     MSG_KILL = 4,
     MSG_LIST = 5,
+    MSG_LIST_JSON = 6,
+    MSG_DISCONNECT = 7,
     MSG_OUTPUT = 101,
     MSG_STATUS = 102,
     MSG_EXIT = 103,
@@ -49,6 +51,7 @@ enum message_type {
 enum status_code {
     STATUS_OK = 0,
     STATUS_NOT_FOUND = 3,
+    STATUS_DISCONNECTED = 4,
     STATUS_INVALID = 64,
     STATUS_UNAVAILABLE = 75,
 };
@@ -68,6 +71,8 @@ struct queued_packet {
     unsigned char data[];
 };
 
+struct client;
+
 struct session {
     struct session *next;
     char id[LUMEN_ID_MAX + 1];
@@ -84,6 +89,10 @@ struct session {
     unsigned char *input;
     size_t input_length;
     int64_t terminate_deadline_ms;
+    int64_t last_activity_ms;
+    time_t created_at;
+    bool restored_from_tmux;
+    struct client *size_owner;
 };
 
 struct client {
@@ -94,6 +103,14 @@ struct client {
     struct queued_packet *queue_tail;
     size_t queued_bytes;
     bool close_after_flush;
+    unsigned short rows;
+    unsigned short columns;
+    uint64_t id;
+    time_t connected_at;
+    char address[64];
+    char browser_key[37];
+    bool skip_replay;
+    bool read_only;
 };
 
 struct server_config {
@@ -102,6 +119,8 @@ struct server_config {
     const char *working_directory;
     size_t history_bytes;
     unsigned int max_sessions;
+    unsigned int idle_timeout_seconds;
+    const char *tmux;
 };
 
 static volatile sig_atomic_t server_stopping;
@@ -316,7 +335,8 @@ static int write_all(int fd, const unsigned char *data, size_t length) {
     return 0;
 }
 
-static int attach_client(const char *socket_path, const char *session_id) {
+static int attach_client(const char *socket_path, const char *session_id,
+                         const char *browser_key, bool skip_replay, bool read_only) {
     size_t id_length = strlen(session_id);
     if (!valid_session_id(session_id, id_length)) {
         fprintf(stderr, "Invalid terminal session id.\n");
@@ -332,8 +352,30 @@ static int attach_client(const char *socket_path, const char *session_id) {
     unsigned short rows = 24;
     unsigned short columns = 80;
     current_window_size(&rows, &columns);
-    if (send_message_blocking(fd, MSG_HELLO, 0, rows, columns,
-                              session_id, id_length) != 0) {
+    char hello[LUMEN_ID_MAX + 1 + 64 + 1 + 37 + 4] = {0};
+    const char *address = getenv("LUMEN_CLIENT_IP");
+    if (!address || !address[0] || strlen(address) >= 64) address = "unknown";
+    bool safe_address = true;
+    for (const unsigned char *p = (const unsigned char *)address; *p; p++) {
+        if (!(isalnum(*p) || *p == '.' || *p == ':' || *p == '-' || *p == '[' || *p == ']')) {
+            safe_address = false;
+            break;
+        }
+    }
+    if (!safe_address) address = "unknown";
+    if (!browser_key || strlen(browser_key) != 36) browser_key = "";
+    for (const unsigned char *p = (const unsigned char *)browser_key; *p; p++) {
+        if (!(isxdigit(*p) || *p == '-')) {
+            browser_key = "";
+            break;
+        }
+    }
+    int hello_length = snprintf(hello, sizeof(hello), "%s\n%s\n%s\n%c\n%c",
+                                session_id, address, browser_key,
+                                skip_replay ? '1' : '0', read_only ? '1' : '0');
+    if (hello_length < 0 || (size_t)hello_length >= sizeof(hello) ||
+        send_message_blocking(fd, MSG_HELLO, 0, rows, columns,
+                              hello, (size_t)hello_length) != 0) {
         fprintf(stderr, "Could not attach to Lumen PTY: %s\n", strerror(errno));
         close(fd);
         return STATUS_UNAVAILABLE;
@@ -507,6 +549,7 @@ static void append_history(struct session *session, const unsigned char *data, s
         memcpy(session->history, data + first, length - first);
     }
     session->history_length += length;
+
 }
 
 static bool queue_packet(struct client *client, size_t queue_limit, uint8_t type,
@@ -630,7 +673,31 @@ static int spawn_shell(struct session *session, const struct server_config *conf
                     config->working_directory, strerror(errno));
             _exit(126);
         }
-        execl(config->shell, shell_name(config->shell), "-l", (char *) NULL);
+        if (config->tmux) {
+            char tmux_session[LUMEN_ID_MAX + 16];
+            snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", session->id);
+            if (session->restored_from_tmux) {
+                execl(config->tmux, config->tmux, "-L", "lumen",
+                      "set-option", "-t", tmux_session, "status", "off",
+                      ";", "attach-session", "-t", tmux_session, (char *)NULL);
+            } else {
+                execl(config->tmux, config->tmux, "-L", "lumen",
+                      "new-session", "-d", "-A", "-s", tmux_session,
+                      config->shell, "-l",
+                      ";", "set-option", "-t", tmux_session, "status", "off",
+                      ";", "set-option", "-g", "history-limit", "50000",
+                      ";", "set-option", "-g", "mouse", "off",
+                      ";", "set-option", "-g", "set-clipboard", "on",
+                      ";", "set-option", "-g", "allow-passthrough", "on",
+                      ";", "set-option", "-g", "terminal-overrides",
+                      "xterm*:XT,xterm-256color:smcup@:rmcup@",
+                      ";", "set-option", "-g", "terminal-features",
+                      "xterm-256color:RGB",
+                      ";", "attach-session", "-t", tmux_session, (char *)NULL);
+            }
+        } else {
+            execl(config->shell, shell_name(config->shell), "-l", (char *)NULL);
+        }
         dprintf(STDERR_FILENO, "Could not start %s: %s\r\n",
                 config->shell, strerror(errno));
         _exit(127);
@@ -649,9 +716,11 @@ static int spawn_shell(struct session *session, const struct server_config *conf
     session->rows = size.ws_row;
     session->columns = size.ws_col;
     session->terminate_deadline_ms = 0;
+    session->last_activity_ms = monotonic_milliseconds();
     session->history_start = 0;
     session->history_length = 0;
     session->history_truncated = false;
+    if (!session->created_at) session->created_at = time(NULL);
     fprintf(stderr, "lumen-pty: started %s as pid %ld\n", session->id, (long) pid);
     return 0;
 }
@@ -696,6 +765,28 @@ static void resize_session(struct session *session, unsigned short rows,
     }
 }
 
+static void claim_session_size(struct client *client) {
+    if (!client || !client->session) {
+        return;
+    }
+    client->session->size_owner = client;
+    resize_session(client->session, client->rows, client->columns);
+}
+
+static void release_session_size(struct client *client, struct client *clients) {
+    if (!client || !client->session || client->session->size_owner != client) {
+        return;
+    }
+    client->session->size_owner = NULL;
+    for (struct client *candidate = clients; candidate; candidate = candidate->next) {
+        if (candidate != client && candidate->fd >= 0 &&
+            candidate->session == client->session && !candidate->close_after_flush) {
+            claim_session_size(candidate);
+            break;
+        }
+    }
+}
+
 static void redraw_session(struct session *session) {
     if (!session || session->master_fd < 0) {
         return;
@@ -715,6 +806,22 @@ static void signal_session(struct session *session, int signal_number) {
         kill(-foreground, signal_number);
     }
     kill(-session->pid, signal_number);
+}
+
+static int kill_tmux_session(const struct server_config *config, const char *id) {
+    if (!config->tmux) return -1;
+    char name[LUMEN_ID_MAX + 16];
+    snprintf(name, sizeof(name), "lumen-%s", id);
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execl(config->tmux, config->tmux, "-L", "lumen", "kill-session",
+              "-t", name, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
 static bool queue_session_input(struct session *session, const unsigned char *data,
@@ -746,6 +853,23 @@ static bool queue_session_input(struct session *session, const unsigned char *da
     memcpy(session->input + session->input_length, data, length);
     session->input_length += length;
     return true;
+}
+
+static bool terminal_handshake_response(const unsigned char *data, size_t length) {
+    size_t offset = 0;
+    bool found = false;
+    while (offset < length) {
+        if (length - offset < 5 || data[offset] != 0x1b || data[offset + 1] != '[')
+            return false;
+        size_t index = offset + 2;
+        if (data[index] == '>' || data[index] == '?') index++;
+        size_t digits = index;
+        while (index < length && (isdigit(data[index]) || data[index] == ';')) index++;
+        if (index == digits || index >= length || data[index] != 'c') return false;
+        found = true;
+        offset = index + 1;
+    }
+    return found;
 }
 
 static bool flush_session_input(struct session *session) {
@@ -927,6 +1051,7 @@ static bool client_has_expected_uid(int fd) {
 }
 
 static struct client *accept_client(int listen_fd) {
+    static uint64_t next_client_id = 1;
     int fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (fd < 0) {
         return NULL;
@@ -942,6 +1067,9 @@ static struct client *accept_client(int listen_fd) {
         return NULL;
     }
     client->fd = fd;
+    client->id = next_client_id++;
+    client->connected_at = time(NULL);
+    memcpy(client->address, "unknown", sizeof("unknown"));
     return client;
 }
 
@@ -975,26 +1103,94 @@ static bool handle_client_message(struct client *client, struct session **sessio
     }
 
     if (header.type == MSG_HELLO) {
-        if (client->session || !valid_session_id((const char *) payload, header.length)) {
+        const unsigned char *separator = memchr(payload, '\n', header.length);
+        size_t id_length = separator ? (size_t)(separator - payload) : header.length;
+        if (client->session || !valid_session_id((const char *) payload, id_length)) {
             queue_status_and_close(client, queue_limit, STATUS_INVALID);
             return true;
         }
         char id[LUMEN_ID_MAX + 1] = {0};
-        memcpy(id, payload, header.length);
+        memcpy(id, payload, id_length);
+        if (separator) {
+            const unsigned char *metadata = separator + 1;
+            size_t metadata_length = header.length - id_length - 1;
+            const unsigned char *key_separator = memchr(metadata, '\n', metadata_length);
+            size_t address_length = key_separator ? (size_t)(key_separator - metadata) : metadata_length;
+            if (address_length > 0 && address_length < sizeof(client->address)) {
+                memcpy(client->address, metadata, address_length);
+                client->address[address_length] = '\0';
+            }
+            if (key_separator) {
+                const unsigned char *key = key_separator + 1;
+                size_t key_and_flag_length = metadata_length - address_length - 1;
+                const unsigned char *flag_separator = memchr(key, '\n', key_and_flag_length);
+                size_t key_length = flag_separator ? (size_t)(flag_separator - key) : key_and_flag_length;
+                if (key_length == 36) {
+                    memcpy(client->browser_key, key, key_length);
+                    client->browser_key[key_length] = '\0';
+                }
+                if (flag_separator && key_and_flag_length > key_length + 1) {
+                    client->skip_replay = flag_separator[1] == '1';
+                    size_t remaining = key_and_flag_length - key_length - 1;
+                    const unsigned char *readonly_separator =
+                        memchr(flag_separator + 1, '\n', remaining);
+                    if (readonly_separator && readonly_separator + 1 < metadata + metadata_length)
+                        client->read_only = readonly_separator[1] == '1';
+                }
+            }
+        }
         struct session *session = find_session(*sessions, id);
         if (!session) {
             session = create_session(sessions, config, id, header.rows, header.columns);
+        } else if (session->master_fd < 0 &&
+                   spawn_shell(session, config, header.rows, header.columns) != 0) {
+            session = NULL;
         }
         if (!session) {
             queue_status_and_close(client, queue_limit, STATUS_UNAVAILABLE);
             return true;
         }
         client->session = session;
-        if (!replay_session(client, session, queue_limit)) {
+        session->last_activity_ms = monotonic_milliseconds();
+        client->rows = header.rows;
+        client->columns = header.columns;
+        if (!session->size_owner) {
+            session->size_owner = client;
+        }
+        if (!client->skip_replay && !replay_session(client, session, queue_limit)) {
             return false;
         }
-        resize_session(session, header.rows, header.columns);
-        redraw_session(session);
+        if (session->size_owner == client) {
+            resize_session(session, client->rows, client->columns);
+            redraw_session(session);
+        }
+        return true;
+    }
+
+    if (header.type == MSG_DISCONNECT) {
+        if (client->session || !header.length || header.length >= 32) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        char value[32] = {0};
+        memcpy(value, payload, header.length);
+        char *end = NULL;
+        errno = 0;
+        uint64_t target_id = strtoull(value, &end, 10);
+        if (errno || !target_id || !end || *end) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        struct client *target = clients;
+        while (target && (target->id != target_id || !target->session)) target = target->next;
+        if (!target) {
+            queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+            return true;
+        }
+        release_session_size(target, clients);
+        queue_packet(target, queue_limit, MSG_EXIT, STATUS_DISCONNECTED, NULL, 0);
+        target->close_after_flush = true;
+        queue_status_and_close(client, queue_limit, STATUS_OK);
         return true;
     }
 
@@ -1002,6 +1198,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
         if (!client->session || !header.length) {
             return client->session != NULL;
         }
+        if (client->read_only || terminal_handshake_response(payload, header.length)) return true;
+        client->session->last_activity_ms = monotonic_milliseconds();
         return queue_session_input(client->session, payload, header.length);
     }
 
@@ -1009,7 +1207,11 @@ static bool handle_client_message(struct client *client, struct session **sessio
         if (!client->session || header.length) {
             return false;
         }
-        resize_session(client->session, header.rows, header.columns);
+        client->rows = header.rows;
+        client->columns = header.columns;
+        if (client->session->size_owner == client) {
+            resize_session(client->session, client->rows, client->columns);
+        }
         return true;
     }
 
@@ -1025,32 +1227,79 @@ static bool handle_client_message(struct client *client, struct session **sessio
             queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
             return true;
         }
+        if (config->tmux) {
+            int result = kill_tmux_session(config, id);
+            queue_status_and_close(client, queue_limit,
+                                   result == 0 ? STATUS_OK : STATUS_UNAVAILABLE);
+            return true;
+        }
         signal_session(session, SIGHUP);
         session->terminate_deadline_ms = monotonic_milliseconds() + 2000;
         queue_status_and_close(client, queue_limit, STATUS_OK);
         return true;
     }
 
-    if (header.type == MSG_LIST) {
+    if (header.type == MSG_LIST || header.type == MSG_LIST_JSON) {
         if (client->session || header.length) {
             queue_status_and_close(client, queue_limit, STATUS_INVALID);
             return true;
         }
         char list[LUMEN_PACKET_DATA_MAX];
         size_t used = 0;
+        if (header.type == MSG_LIST_JSON) {
+            list[used++] = '[';
+        }
         for (struct session *session = *sessions; session; session = session->next) {
-            int written = snprintf(list + used, sizeof(list) - used,
-                                   "%-32s pid=%-7ld clients=%u history=%zu%s\n",
-                                   session->id, (long) session->pid,
-                                   attached_client_count(clients, session),
-                                   session->history_length,
-                                   session->history_truncated ? " (ring)" : "");
+            int written = header.type == MSG_LIST_JSON
+                ? snprintf(list + used, sizeof(list) - used,
+                           "%s{\"id\":\"%s\",\"pid\":%ld,\"clients\":%u,"
+                           "\"historyBytes\":%zu,\"historyTruncated\":%s,"
+                           "\"rows\":%u,\"columns\":%u,\"createdAt\":%lld,\"connections\":[",
+                           used > 1 ? "," : "", session->id, (long) session->pid,
+                           attached_client_count(clients, session),
+                           session->history_length,
+                           session->history_truncated ? "true" : "false",
+                           session->rows, session->columns, (long long)session->created_at)
+                : snprintf(list + used, sizeof(list) - used,
+                           "%-32s pid=%-7ld clients=%u history=%zu%s\n",
+                           session->id, (long) session->pid,
+                           attached_client_count(clients, session),
+                           session->history_length,
+                           session->history_truncated ? " (ring)" : "");
             if (written < 0 || (size_t) written >= sizeof(list) - used) {
                 break;
             }
             used += (size_t) written;
+            if (header.type == MSG_LIST_JSON) {
+                bool first = true;
+                for (struct client *attached = clients; attached; attached = attached->next) {
+                    if (attached->session != session || attached->close_after_flush) continue;
+                    written = snprintf(list + used, sizeof(list) - used,
+                                       "%s{\"id\":\"%llu\",\"connectedAt\":%lld,"
+                                       "\"ip\":\"%s\",\"rows\":%u,\"columns\":%u,"
+                                       "\"browserKey\":\"%s\"}",
+                                       first ? "" : ",",
+                                       (unsigned long long)attached->id,
+                                       (long long)attached->connected_at, attached->address,
+                                       attached->rows, attached->columns,
+                                       attached->browser_key);
+                    if (written < 0 || (size_t)written >= sizeof(list) - used) break;
+                    used += (size_t)written;
+                    first = false;
+                }
+                if (used + 2 >= sizeof(list)) {
+                    return queue_status_and_close(client, queue_limit, STATUS_UNAVAILABLE);
+                }
+                list[used++] = ']';
+                list[used++] = '}';
+            }
         }
-        if (!used) {
+        if (header.type == MSG_LIST_JSON) {
+            if (used >= sizeof(list) - 1) {
+                return queue_status_and_close(client, queue_limit, STATUS_UNAVAILABLE);
+            }
+            list[used++] = ']';
+        } else if (!used) {
             static const char empty[] = "No persistent PTY sessions.\n";
             memcpy(list, empty, sizeof(empty) - 1);
             used = sizeof(empty) - 1;
@@ -1073,6 +1322,72 @@ static void terminate_expired_sessions(struct session *sessions) {
     }
 }
 
+static void terminate_idle_sessions(struct session *sessions, const struct client *clients,
+                                    unsigned int idle_timeout_seconds) {
+    if (!idle_timeout_seconds) {
+        return;
+    }
+    int64_t now = monotonic_milliseconds();
+    int64_t timeout_ms = (int64_t) idle_timeout_seconds * 1000;
+    for (struct session *session = sessions; session; session = session->next) {
+        if (!session->terminate_deadline_ms &&
+            attached_client_count(clients, session) == 0 &&
+            now - session->last_activity_ms >= timeout_ms) {
+            fprintf(stderr, "lumen-pty: reclaiming idle session %s\n", session->id);
+            signal_session(session, SIGHUP);
+            session->terminate_deadline_ms = now + 2000;
+        }
+    }
+}
+
+static void discover_tmux_sessions(struct session **sessions,
+                                   const struct server_config *config) {
+    if (!config->tmux) return;
+    int fds[2];
+    if (pipe(fds) != 0) return;
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        execl(config->tmux, config->tmux, "-L", "lumen", "list-sessions",
+              "-F", "#{session_name}\t#{session_created}", (char *)NULL);
+        _exit(127);
+    }
+    close(fds[1]);
+    FILE *stream = fdopen(fds[0], "r");
+    char line[128];
+    while (stream && fgets(line, sizeof(line), stream)) {
+        char name[64] = "";
+        long long created = 0;
+        if (sscanf(line, "%63[^\t]\t%lld", name, &created) != 2 ||
+            strncmp(name, "lumen-", 6) != 0)
+            continue;
+        const char *id = name + 6;
+        size_t id_length = strlen(id);
+        if (!valid_session_id(id, id_length) || session_count(*sessions) >= config->max_sessions)
+            continue;
+        struct session *session = calloc(1, sizeof(*session));
+        if (!session) break;
+        memcpy(session->id, id, id_length + 1);
+        session->master_fd = -1;
+        session->history_capacity = config->history_bytes;
+        session->created_at = (time_t)created;
+        session->restored_from_tmux = true;
+        session->last_activity_ms = monotonic_milliseconds();
+        session->next = *sessions;
+        *sessions = session;
+        fprintf(stderr, "lumen-pty: discovered persistent tmux session %s\n", id);
+    }
+    if (stream) fclose(stream); else close(fds[0]);
+    while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
 static int serve(const struct server_config *config) {
     int listen_fd = create_listen_socket(config->socket_path);
     if (listen_fd < 0) {
@@ -1091,6 +1406,7 @@ static int serve(const struct server_config *config) {
 
     struct session *sessions = NULL;
     struct client *clients = NULL;
+    discover_tmux_sessions(&sessions, config);
     size_t queue_limit = config->history_bytes + LUMEN_QUEUE_EXTRA;
     fprintf(stderr, "lumen-pty: listening on %s (%zu byte replay, %u sessions)\n",
             config->socket_path, config->history_bytes, config->max_sessions);
@@ -1185,6 +1501,7 @@ static int serve(const struct server_config *config) {
                     for (;;) {
                         ssize_t received = read(session->master_fd, output, sizeof(output));
                         if (received > 0) {
+                            session->last_activity_ms = monotonic_milliseconds();
                             append_history(session, output, (size_t) received);
                             queue_session_output(clients, session, queue_limit,
                                                  output, (size_t) received);
@@ -1210,6 +1527,7 @@ static int serve(const struct server_config *config) {
                 remove = true;
             }
             if (remove) {
+                release_session_size(client, clients);
                 if (client->fd < 0) {
                     client->fd = -client->fd - 1;
                 }
@@ -1221,6 +1539,7 @@ static int serve(const struct server_config *config) {
         }
 
         terminate_expired_sessions(sessions);
+        terminate_idle_sessions(sessions, clients, config->idle_timeout_seconds);
         if (child_changed) {
             reap_children(&sessions, clients, queue_limit);
         }
@@ -1272,11 +1591,14 @@ static unsigned long parse_unsigned(const char *value, unsigned long minimum,
 static void usage(FILE *stream) {
     fprintf(stream,
             "Usage:\n"
-            "  lumen-pty <session-id>\n"
+            "  lumen-pty <session-id> [browser-connection-key] [skip-replay] [read-only]\n"
             "  lumen-pty --kill <session-id>\n"
+            "  lumen-pty --disconnect <connection-id>\n"
             "  lumen-pty --list\n"
+            "  lumen-pty --list-json\n"
             "  lumen-pty --serve [--socket PATH] [--shell PATH] [--cwd PATH]\\\n"
-            "             [--history-bytes N] [--max-sessions N]\n");
+            "             [--history-bytes N] [--max-sessions N] [--idle-timeout N]\\\n"
+            "             [--tmux PATH]\n");
 }
 
 int main(int argc, char **argv) {
@@ -1310,12 +1632,18 @@ int main(int argc, char **argv) {
             } else if (strcmp(argv[index], "--max-sessions") == 0 && index + 1 < argc) {
                 config.max_sessions = (unsigned int) parse_unsigned(
                     argv[++index], 1, LUMEN_SESSIONS_MAX, "maximum session count");
+            } else if (strcmp(argv[index], "--idle-timeout") == 0 && index + 1 < argc) {
+                config.idle_timeout_seconds = (unsigned int) parse_unsigned(
+                    argv[++index], 0, 31536000, "idle session timeout");
+            } else if (strcmp(argv[index], "--tmux") == 0 && index + 1 < argc) {
+                config.tmux = argv[++index];
             } else {
                 usage(stderr);
                 return STATUS_INVALID;
             }
         }
         if (!config.socket_path[0] || access(config.shell, X_OK) != 0 ||
+            (config.tmux && access(config.tmux, X_OK) != 0) ||
             access(config.working_directory, X_OK) != 0) {
             fprintf(stderr, "Invalid supervisor socket, shell, or working directory.\n");
             return STATUS_INVALID;
@@ -1326,11 +1654,23 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "--kill") == 0) {
         return control_client(socket_path, MSG_KILL, argv[2]);
     }
+    if (argc == 3 && strcmp(argv[1], "--disconnect") == 0) {
+        char *end = NULL;
+        errno = 0;
+        (void)strtoull(argv[2], &end, 10);
+        if (errno || !end || end == argv[2] || *end) return STATUS_INVALID;
+        return control_client(socket_path, MSG_DISCONNECT, argv[2]);
+    }
     if (argc == 2 && strcmp(argv[1], "--list") == 0) {
         return control_client(socket_path, MSG_LIST, NULL);
     }
-    if (argc == 2 && argv[1][0] != '-') {
-        return attach_client(socket_path, argv[1]);
+    if (argc == 2 && strcmp(argv[1], "--list-json") == 0) {
+        return control_client(socket_path, MSG_LIST_JSON, NULL);
+    }
+    if ((argc >= 2 && argc <= 5) && argv[1][0] != '-') {
+        return attach_client(socket_path, argv[1], argc >= 3 ? argv[2] : NULL,
+                             argc >= 4 && !strcmp(argv[3], "1"),
+                             argc == 5 && !strcmp(argv[4], "1"));
     }
     usage(argc == 2 && strcmp(argv[1], "--help") == 0 ? stdout : stderr);
     return argc == 2 && strcmp(argv[1], "--help") == 0 ? 0 : STATUS_INVALID;

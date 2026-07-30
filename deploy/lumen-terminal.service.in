@@ -13,6 +13,7 @@ Environment=HOME=@HOME@
 Environment=LANG=C.UTF-8
 Environment=TERM=xterm-256color
 Environment=LUMEN_PTY_SOCKET=@STATE_ROOT@/pty.sock
+Environment=LUMEN_LOGIN_TEMPLATE=/opt/lumen-terminal/dist/login.html
 EnvironmentFile=/etc/lumen-terminal/runtime.env
 ExecStart=/opt/lumen-terminal/bin/lumen-ttyd --uid @UID@ --gid @GID@ --port ${LUMEN_PORT} --interface ${LUMEN_INTERFACE} --writable --url-arg --check-origin --security-config ${LUMEN_SECURITY_CONFIG} --max-clients ${LUMEN_MAX_CLIENTS} --ping-interval ${LUMEN_PING_INTERVAL} --index /opt/lumen-terminal/dist/index.html /opt/lumen-terminal/bin/lumen-pty
 Restart=on-failure
@@ -26,6 +27,8 @@ UMask=0077
 LimitNOFILE=4096
 LimitCORE=0
 TasksMax=256
+MemoryHigh=512M
+MemoryMax=768M
 
 [Install]
 WantedBy=multi-user.target
