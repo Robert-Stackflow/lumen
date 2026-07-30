@@ -245,7 +245,8 @@ LUMEN_PTY_SOCKET="$HOME/.local/state/lumen-terminal/pty.sock" \
 - 普通 shell 中拖动由 xterm.js 选取；松开后保留选区和滚动位置，不会跳回底部。
 - TUI 正在接收鼠标时，按住 `Shift` 拖动可强制使用浏览器终端选区；
   macOS 也可按住 `Option` 拖动。
-- 浏览器选区使用 `Ctrl+Shift+C`，macOS 使用 `Cmd+C`。
+- 鼠标松开并完成选取时会自动复制；也可使用 `Ctrl+Shift+C`，macOS
+  使用 `Cmd+C` 再次复制当前选区。
 - 粘贴使用 `Ctrl+Shift+V`，macOS 使用 `Cmd+V`；xterm.js 会保留
   bracketed paste 保护。
 - 鼠标选区与复制内容共用同一套逐行范围：真实行尾的 Unicode 空白不会

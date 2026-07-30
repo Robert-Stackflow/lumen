@@ -211,6 +211,13 @@
     });
   }
 
+  function copyTerminalSelection(session) {
+    if (session.destroyed || !session.term.hasSelection()) return;
+    const text = normalizeSelectionFromTerminal(session.term);
+    if (text.length === 0) return;
+    void writeSystemClipboard(text, false, true);
+  }
+
   function installSelectionOverlay(session) {
     const screen = session.term.element?.querySelector('.xterm-screen');
     if (!screen) throw new Error('xterm screen was not created');
@@ -236,6 +243,7 @@
       if (!pointerSelecting) return;
       if (event.buttons === 0) {
         pointerSelecting = false;
+        queueMicrotask(() => copyTerminalSelection(session));
       }
       scheduleSelectionOverlay(session);
     };
@@ -243,16 +251,25 @@
       if (!pointerSelecting) return;
       pointerSelecting = false;
       scheduleSelectionOverlay(session);
+      // xterm finalizes double-click, triple-click, and drag selections later
+      // in this pointerup dispatch. A microtask sees the completed range while
+      // retaining the user activation needed by restrictive clipboard APIs.
+      queueMicrotask(() => copyTerminalSelection(session));
+    };
+    const cancelPointerSelection = () => {
+      if (!pointerSelecting) return;
+      pointerSelecting = false;
+      scheduleSelectionOverlay(session);
     };
     screen.addEventListener('pointerdown', beginPointerSelection, true);
     window.addEventListener('pointermove', updatePointerSelection, true);
     window.addEventListener('pointerup', endPointerSelection, true);
-    window.addEventListener('pointercancel', endPointerSelection, true);
+    window.addEventListener('pointercancel', cancelPointerSelection, true);
     session.selectionPointerCleanup = () => {
       screen.removeEventListener('pointerdown', beginPointerSelection, true);
       window.removeEventListener('pointermove', updatePointerSelection, true);
       window.removeEventListener('pointerup', endPointerSelection, true);
-      window.removeEventListener('pointercancel', endPointerSelection, true);
+      window.removeEventListener('pointercancel', cancelPointerSelection, true);
     };
     scheduleSelectionOverlay(session);
   }
