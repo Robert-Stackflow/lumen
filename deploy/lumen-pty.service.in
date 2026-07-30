@@ -1,0 +1,28 @@
+[Unit]
+Description=Lumen persistent PTY supervisor
+Documentation=file:///opt/lumen-terminal/README.md
+After=local-fs.target
+Before=lumen-terminal.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@HOME@
+Environment=HOME=@HOME@
+Environment=LANG=C.UTF-8
+Environment=SHELL=@SHELL@
+Environment=LUMEN_PTY_SOCKET=@STATE_ROOT@/pty.sock
+ExecStart=/opt/lumen-terminal/bin/lumen-pty --serve --socket @STATE_ROOT@/pty.sock --shell @SHELL@ --cwd @HOME@ --history-bytes ${LUMEN_PTY_HISTORY_BYTES} --max-sessions ${LUMEN_MAX_SESSIONS}
+EnvironmentFile=/etc/lumen-terminal/runtime.env
+Restart=on-failure
+RestartSec=1
+KillMode=control-group
+TimeoutStopSec=5
+UMask=0077
+LimitNOFILE=4096
+LimitCORE=0
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

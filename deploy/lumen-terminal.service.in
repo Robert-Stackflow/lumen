@@ -1,0 +1,31 @@
+[Unit]
+Description=Lumen web terminal
+Documentation=file:///opt/lumen-terminal/README.md
+Requires=lumen-pty.service
+After=network.target lumen-pty.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=@HOME@
+Environment=HOME=@HOME@
+Environment=LANG=C.UTF-8
+Environment=TERM=xterm-256color
+Environment=LUMEN_PTY_SOCKET=@STATE_ROOT@/pty.sock
+EnvironmentFile=/etc/lumen-terminal/runtime.env
+ExecStart=/opt/lumen-terminal/bin/lumen-ttyd --uid @UID@ --gid @GID@ --port ${LUMEN_PORT} --interface ${LUMEN_INTERFACE} --writable --url-arg --check-origin --security-config ${LUMEN_SECURITY_CONFIG} --max-clients ${LUMEN_MAX_CLIENTS} --ping-interval ${LUMEN_PING_INTERVAL} --index /opt/lumen-terminal/dist/index.html /opt/lumen-terminal/bin/lumen-pty
+Restart=on-failure
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=10
+
+# This base profile deliberately permits sudo/setuid escalation. Apply
+# deploy/no-root-hardening.conf as a systemd drop-in to disable it.
+UMask=0077
+LimitNOFILE=4096
+LimitCORE=0
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

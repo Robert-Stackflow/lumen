@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Create and rotate Lumen's dependency-free security policy."""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import os
+from pathlib import Path
+import secrets
+import stat
+import tempfile
+
+
+PBKDF2_ITERATIONS = 600_000
+DEFAULT_CONFIG = Path("/etc/lumen-terminal/security.conf")
+KEY_ORDER = (
+    "mode",
+    "username",
+    "password_hash",
+    "session_secret",
+    "session_generation",
+    "session_ttl_days",
+    "cookie_secure",
+    "allowed_host",
+    "proxy_header",
+    "client_ip_header",
+    "login_max_failures",
+    "login_window_seconds",
+    "login_lockout_seconds",
+)
+
+
+def password_hash(password: str) -> str:
+    encoded = password.encode("utf-8")
+    if not 12 <= len(encoded) <= 128:
+        raise SystemExit("Password must be between 12 and 128 UTF-8 bytes.")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", encoded, salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2-sha256${PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def read_config(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise SystemExit(f"Invalid config line {number}: missing '='")
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def write_config(path: Path, values: dict[str, str]) -> None:
+    path.parent.mkdir(mode=0o750, parents=True, exist_ok=True)
+    previous = path.stat() if path.exists() else None
+    content = [
+        "# Lumen security policy. Edit values, then restart lumen-terminal.",
+        "# Modes: session (built-in login), proxy (trusted identity header), off.",
+    ]
+    for key in KEY_ORDER:
+        if key in values:
+            content.append(f"{key}={values[key]}")
+    unknown = sorted(set(values) - set(KEY_ORDER))
+    for key in unknown:
+        content.append(f"{key}={values[key]}")
+    content.append("")
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".security.", dir=path.parent, text=True)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o640)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(content))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if previous is not None:
+            os.chown(temporary, previous.st_uid, previous.st_gid)
+            os.chmod(temporary, stat.S_IMODE(previous.st_mode))
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def generated_password() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def init(args: argparse.Namespace) -> None:
+    if args.config.exists() and not args.force:
+        raise SystemExit(f"{args.config} already exists; refusing to overwrite it.")
+    password = generated_password()
+    values = {
+        "mode": "session",
+        "username": args.username,
+        "password_hash": password_hash(password),
+        "session_secret": secrets.token_hex(32),
+        "session_generation": "1",
+        "session_ttl_days": str(args.session_days),
+        "cookie_secure": "false" if args.insecure_cookie else "true",
+        "allowed_host": args.host,
+        "proxy_header": "X-Remote-User",
+        "client_ip_header": args.client_ip_header,
+        "login_max_failures": "5",
+        "login_window_seconds": "300",
+        "login_lockout_seconds": "300",
+    }
+    write_config(args.config, values)
+    print(f"Username: {args.username}")
+    print(f"Password: {password}")
+    print("The plaintext password is not stored. Save it now.")
+
+
+def set_password(args: argparse.Namespace) -> None:
+    values = read_config(args.config)
+    if args.generate:
+        password = generated_password()
+    else:
+        password = getpass.getpass("New password: ")
+        if password != getpass.getpass("Repeat password: "):
+            raise SystemExit("Passwords did not match.")
+    values["password_hash"] = password_hash(password)
+    if args.revoke_sessions:
+        values["session_generation"] = str(int(values.get("session_generation", "1")) + 1)
+    write_config(args.config, values)
+    if args.generate:
+        print(f"Password: {password}")
+        print("The plaintext password is not stored. Save it now.")
+    print("Restart lumen-terminal to activate the new password.")
+
+
+def revoke(args: argparse.Namespace) -> None:
+    values = read_config(args.config)
+    values["session_generation"] = str(int(values.get("session_generation", "1")) + 1)
+    write_config(args.config, values)
+    print("All existing device sessions will be invalid after lumen-terminal is restarted.")
+
+
+def set_mode(args: argparse.Namespace) -> None:
+    values = read_config(args.config)
+    values["mode"] = args.mode
+    if args.mode == "proxy":
+        values["proxy_header"] = args.proxy_header
+    if args.cookie_secure is not None:
+        values["cookie_secure"] = "true" if args.cookie_secure else "false"
+    if args.host is not None:
+        values["allowed_host"] = args.host
+    write_config(args.config, values)
+    print("Restart lumen-terminal to activate the policy.")
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description=__doc__)
+    subcommands = root.add_subparsers(dest="command", required=True)
+
+    create = subcommands.add_parser("init", help="create a new session policy and random password")
+    create.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    create.add_argument("--username", required=True)
+    create.add_argument("--host", required=True)
+    create.add_argument("--session-days", type=int, default=180)
+    create.add_argument("--client-ip-header", default="")
+    create.add_argument("--insecure-cookie", action="store_true")
+    create.add_argument("--force", action="store_true")
+    create.set_defaults(handler=init)
+
+    password = subcommands.add_parser("set-password", help="rotate the password")
+    password.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    password.add_argument("--generate", action="store_true")
+    password.add_argument("--keep-sessions", dest="revoke_sessions", action="store_false")
+    password.set_defaults(handler=set_password, revoke_sessions=True)
+
+    revoke_sessions = subcommands.add_parser("revoke-sessions", help="invalidate every device session")
+    revoke_sessions.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    revoke_sessions.set_defaults(handler=revoke)
+
+    mode = subcommands.add_parser("set-mode", help="switch between session, proxy, and off")
+    mode.add_argument("mode", choices=("session", "proxy", "off"))
+    mode.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    mode.add_argument("--proxy-header", default="X-Remote-User")
+    mode.add_argument("--host")
+    cookie = mode.add_mutually_exclusive_group()
+    cookie.add_argument("--secure-cookie", dest="cookie_secure", action="store_true")
+    cookie.add_argument("--insecure-cookie", dest="cookie_secure", action="store_false")
+    mode.set_defaults(handler=set_mode, cookie_secure=None)
+    return root
+
+
+def main() -> None:
+    args = parser().parse_args()
+    args.handler(args)
+
+
+if __name__ == "__main__":
+    main()

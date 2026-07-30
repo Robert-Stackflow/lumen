@@ -1,0 +1,29 @@
+{
+  // Merge this into the tailnet policy and replace the example identity.
+  "groups": {
+    "group:lumen-users": [
+      "owner@example.com",
+    ],
+  },
+
+  "tagOwners": {
+    "tag:lumen-terminal": [
+      "autogroup:admin",
+    ],
+  },
+
+  "grants": [
+    {
+      "src": ["group:lumen-users"],
+      "dst": ["tag:lumen-terminal"],
+      "ip": ["tcp:443"],
+    },
+  ],
+
+  "tests": [
+    {
+      "src": "owner@example.com",
+      "accept": ["tag:lumen-terminal:443"],
+    },
+  ],
+}

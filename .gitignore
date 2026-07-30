@@ -1,0 +1,19 @@
+# Generated build output
+/build/
+/bin/
+/dist/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Never commit deployment secrets or live runtime policy
+security.conf
+runtime.env
+*.secret
+*.credentials
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
