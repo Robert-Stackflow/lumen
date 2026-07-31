@@ -22,6 +22,11 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
+if (($# < 2)); then
+  usage >&2
+  exit 64
+fi
+
 if ! command -v apt-get >/dev/null 2>&1; then
   echo "This bootstrap script supports Debian and Ubuntu hosts with apt-get." >&2
   exit 69
@@ -38,14 +43,22 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y \
   build-essential \
+  bubblewrap \
+  ca-certificates \
   cmake \
+  curl \
+  git \
   libjson-c-dev \
   libssl-dev \
   libuv1-dev \
   libwebsockets-dev libfido2-dev libqrencode-dev \
+  iproute2 \
+  nodejs \
+  pkg-config \
   python3 \
   tmux \
   zlib1g-dev
 
+"$project_dir/scripts/check-env.sh" "${1:-}" "${2:-}"
 make -C "$project_dir" check
 exec "$project_dir/scripts/install.sh" "$@"

@@ -158,7 +158,7 @@ client_ip_header=
 克隆后，用一个命令安装构建依赖、运行测试并部署：
 
 ```bash
-git clone https://github.com/RanranranQAQ/lumen.git
+git clone https://github.com/Robert-Stackflow/lumen.git
 cd lumen
 sudo ./scripts/bootstrap-debian.sh ubuntu terminal.example.com \
   --listen lo \
@@ -176,8 +176,9 @@ sudo ./scripts/bootstrap-debian.sh ubuntu terminal.example.com \
 
 ```bash
 sudo apt-get install \
-  build-essential cmake libjson-c-dev libuv1-dev \
-  libwebsockets-dev zlib1g-dev libssl-dev
+  build-essential bubblewrap ca-certificates cmake curl git iproute2 \
+  libjson-c-dev libfido2-dev libqrencode-dev libssl-dev \
+  libuv1-dev libwebsockets-dev nodejs pkg-config python3 tmux zlib1g-dev
 
 make check
 ```
@@ -224,13 +225,34 @@ sudo ./scripts/install.sh ubuntu terminal.example.com \
 普通 shell 以该非 root Linux 用户运行；网页登录账号与 Linux 用户可以
 不同。PTY 服务启用 `NoNewPrivileges` 且能力边界为空，即使该 Linux 用户
 在其他入口拥有 sudo 权限，普通浏览器终端也不能通过 setuid 提升为 root。
-右键标签栏可显式创建 root 会话；它需要重新验证 TOTP 或通行密钥，并由
-独立的 `lumen-root-pty.service` 承载，不会改变普通 “+” 按钮的权限。
+右键标签栏可显式创建 root 会话，并由独立的 `lumen-root-pty.service`
+承载。设置页可以控制普通 “+” 是否默认创建 root 会话、root 会话数量，
+以及是否要求 TOTP/通行密钥重新验证；默认仍创建普通用户会话并要求验证。
 
 监听地址、端口、最大连接数和认证配置路径保存在
 `/etc/lumen-terminal/runtime.env`，无需修改 systemd 单元。仓库中的
 `deploy/README.md` 给出了回环代理、环境自有端口转发和可信内网直连三种
 部署；OpenResty/nginx 示例位于 `deploy/openresty-terminal.conf`。
+
+安装前可以单独运行只读环境体检，安装后也可以重复执行服务验收：
+
+```bash
+./scripts/check-env.sh ubuntu terminal.example.com --listen lo --port 7681
+sudo ./scripts/verify-install.sh terminal.example.com
+```
+
+升级、备份、恢复与卸载入口如下。升级和卸载都会先创建权限为 `0600` 的
+备份；卸载默认保留认证数据，并在存在会话时拒绝执行。
+
+```bash
+sudo ./scripts/upgrade.sh ubuntu terminal.example.com \
+  --listen lo --port 7681 --client-ip-header X-Real-IP
+sudo ./scripts/backup.sh
+sudo ./scripts/restore-backup.sh /var/backups/lumen-terminal/lumen-backup-日期.tar.gz
+sudo ./scripts/uninstall.sh
+```
+
+完整的检查项、验收逻辑、回滚与卸载选项见 `deploy/README.md`。
 
 ## 会话操作
 

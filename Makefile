@@ -46,6 +46,8 @@ check: build
 		echo "node unavailable; selection unit tests skipped"; \
 	fi
 	bash -n scripts/run-dev.sh scripts/install.sh scripts/bootstrap-debian.sh \
+		scripts/check-env.sh scripts/verify-install.sh scripts/backup.sh \
+		scripts/restore-backup.sh scripts/upgrade.sh scripts/uninstall.sh \
 		scripts/lumen-shell-integration.sh
 	python3 -m py_compile scripts/lumen-auth
 	test -s dist/index.html
@@ -54,6 +56,7 @@ check: build
 	bin/lumen-pty --help >/dev/null
 	bash tests/supervisor.sh
 	bash tests/auth_sessions.sh
+	bash tests/deployment_contract.sh
 
 clean:
 	rm -rf build bin/lumen-ttyd bin/lumen-pty dist/index.html

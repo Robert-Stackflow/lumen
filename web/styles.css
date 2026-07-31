@@ -459,8 +459,11 @@ a:focus-visible {
 }
 
 .latency {
-  flex: 0 0 auto;
-  min-width: 41px;
+  /* Keep the tooltip anchor stationary while the RTT text changes width. */
+  flex: 0 0 46px;
+  width: 46px;
+  min-width: 46px;
+  overflow: hidden;
   color: var(--subtle);
   font: 520 10px/1 ui-monospace, "SFMono-Regular", "Cascadia Code", monospace;
   font-variant-numeric: tabular-nums;

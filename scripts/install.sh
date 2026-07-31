@@ -17,6 +17,7 @@ usage() {
   echo "  --client-ip-header <header>      Trusted proxy client-IP header"
   echo "  --insecure-cookie                Permit session cookies over HTTP"
   echo "  --replace-legacy-sessions        Stop and remove the retired tmux supervisor"
+  echo "  --skip-verify                    Skip the post-install health verification"
 }
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -49,6 +50,7 @@ root_idle_timeout="1800"
 client_ip_header=""
 cookie_secure="true"
 replace_legacy_sessions="false"
+skip_verify="false"
 
 while (($#)); do
   case "$1" in
@@ -98,6 +100,10 @@ while (($#)); do
       ;;
     --replace-legacy-sessions)
       replace_legacy_sessions="true"
+      shift
+      ;;
+    --skip-verify)
+      skip_verify="true"
       shift
       ;;
     -h|--help)
@@ -245,6 +251,13 @@ install -o root -g root -m 0755 "$project_dir/bin/lumen-pty" "$install_dir/bin/l
 install -o root -g root -m 0644 "$project_dir/dist/index.html" "$install_dir/dist/index.html"
 install -o root -g root -m 0644 "$project_dir/web/login.template.html" "$install_dir/dist/login.html"
 install -o root -g root -m 0755 "$project_dir/scripts/lumen-auth" "$install_dir/scripts/lumen-auth"
+install -o root -g root -m 0755 \
+  "$project_dir/scripts/check-env.sh" \
+  "$project_dir/scripts/verify-install.sh" \
+  "$project_dir/scripts/backup.sh" \
+  "$project_dir/scripts/restore-backup.sh" \
+  "$project_dir/scripts/uninstall.sh" \
+  "$install_dir/scripts/"
 install -o root -g root -m 0644 "$project_dir/scripts/lumen-shell-integration.sh" \
   "$install_dir/scripts/lumen-shell-integration.sh"
 install -o root -g root -m 0644 "$project_dir/README.md" "$install_dir/README.md"
@@ -331,6 +344,10 @@ systemctl enable lumen-terminal.service
 systemctl start lumen-pty.service
 systemctl start lumen-root-pty.service
 systemctl restart lumen-terminal.service
+
+if [[ "$skip_verify" != "true" ]]; then
+  "$project_dir/scripts/verify-install.sh" "$allowed_host"
+fi
 
 echo
 echo "Lumen is listening on $listen_interface:$listen_port."
