@@ -1,11 +1,12 @@
 (function (global) {
   'use strict';
 
-  function websocketUrl(location, basePath, id, connectionKey, skipReplay, readOnly) {
+  function websocketUrl(location, basePath, id, connectionKey, skipReplay, readOnly, privilegedGrant = '') {
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${protocol}//${location.host}${basePath}/ws?arg=${encodeURIComponent(id)}`
       + `&arg=${encodeURIComponent(connectionKey)}&arg=${skipReplay ? '1' : '0'}`
-      + `&arg=${readOnly ? '1' : '0'}`;
+      + `&arg=${readOnly ? '1' : '0'}`
+      + (privilegedGrant ? `&arg=${encodeURIComponent(privilegedGrant)}` : '');
   }
 
   function reconnectDelay(attempt) {

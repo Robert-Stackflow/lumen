@@ -43,6 +43,12 @@
       </div>
 
       <div class="chrome-actions">
+        <button id="health-monitor-toggle" class="icon-button" type="button"
+                aria-label="打开服务健康监控">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 13h3l2-6 4 11 2-5h5"/>
+          </svg>
+        </button>
         <button id="export-terminal" class="icon-button" type="button"
                 title="导出当前终端输出" aria-label="导出当前终端输出">
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -345,7 +351,7 @@
                 <button id="refresh-service-health" type="button">刷新</button>
               </span>
             </header>
-            <div id="service-health-summary" class="service-health-summary">每 5 秒自动刷新</div>
+            <div id="service-health-summary" class="service-health-summary">每 3 秒自动刷新</div>
             <div id="service-health-grid" class="service-health-grid">
               <div class="session-manager-loading">正在读取服务状态…</div>
             </div>
@@ -384,6 +390,36 @@
 
           <section class="settings-panel" data-settings-panel="security" hidden>
             <header><h3>安全</h3><p>管理登录方式和当前设备会话</p></header>
+            <div class="settings-list root-policy-settings">
+                <div class="settings-row">
+                  <span><strong>最大 root 会话数量</strong><small>限制同时保留的 root 后台会话，范围为 1–8 个</small></span>
+                  <div id="setting-root-max-sessions" class="custom-select" data-value="2">
+                    <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <span>2 个</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                    </button>
+                    <div class="custom-select-menu" role="listbox" hidden>
+                      <button type="button" role="option" data-value="1">1 个</button>
+                      <button type="button" role="option" data-value="2">2 个</button>
+                      <button type="button" role="option" data-value="3">3 个</button>
+                      <button type="button" role="option" data-value="4">4 个</button>
+                      <button type="button" role="option" data-value="5">5 个</button>
+                      <button type="button" role="option" data-value="6">6 个</button>
+                      <button type="button" role="option" data-value="7">7 个</button>
+                      <button type="button" role="option" data-value="8">8 个</button>
+                    </div>
+                  </div>
+                </div>
+                <label class="settings-row settings-toggle-row">
+                  <span><strong>默认创建 root 会话</strong><small>首次打开、顶部“+”按钮和新建快捷键将创建 root 会话</small></span>
+                  <input id="setting-default-root-session" type="checkbox">
+                  <i class="switch" aria-hidden="true"></i>
+                </label>
+                <label class="settings-row settings-toggle-row">
+                  <span><strong>root 会话需要验证</strong><small>创建或重新进入 root 会话前要求 TOTP 或通行密钥验证</small></span>
+                  <input id="setting-root-require-verification" type="checkbox">
+                  <i class="switch" aria-hidden="true"></i>
+                </label>
+            </div>
             <div class="security-section">
               <div class="security-section-heading">
                 <span><strong>通行密钥</strong><small>使用设备生物识别或安全密钥登录</small></span>
@@ -551,6 +587,13 @@
   </div>
 
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
+
+  <div id="tab-session-popover" class="hover-popover tab-session-popover" role="tooltip" hidden></div>
+  <div id="health-monitor-popover" class="hover-popover health-monitor-popover" role="tooltip" hidden>
+    <header><span><i class="health-dot"></i><strong>服务健康</strong></span><small>正在读取…</small></header>
+    <div class="health-monitor-list"></div>
+    <footer>点击打开完整健康页面</footer>
+  </div>
 
   <script>/*__XTERM_JS__*/</script>
   <script>/*__FIT_JS__*/</script>

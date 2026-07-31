@@ -14,6 +14,7 @@ Ghostty 风格；后端基于精简的 ttyd C/libuv 服务；每个浏览器标�
 - 原生 xterm.js 鼠标、滚动和选择，并通过安全的 OSC 52 桥接到访问设备的系统剪贴板。
 - 约束明确的 C PTY supervisor；Web 层更新、关闭网页或断网都不会终止任务。
 - 关闭标签时明确选择“仅断开”或“结束会话并释放资源”。
+- 可选 root 特权会话：独立 socket/tmux、每次连接二次验证、醒目标识与完整审计。
 - 手机快捷键栏，以及中文系统字体和 IME 兼容。
 - 单文件前端，无 CDN、外部字体、常驻 Node、数据库或 Docker。
 
@@ -58,7 +59,10 @@ username=Ran
 password_hash=pbkdf2-sha256$600000$<salt>$<hash>
 session_secret=<32-byte-random-secret>
 session_generation=1
-session_ttl_days=30
+session_ttl_seconds=43200
+session_idle_seconds=1800
+session_store=/var/lib/lumen-terminal/sessions
+require_mfa=true
 cookie_secure=true
 allowed_host=terminal.example.com
 proxy_header=X-Remote-User
@@ -66,11 +70,11 @@ client_ip_header=X-Real-IP
 login_max_failures=5
 login_window_seconds=300
 login_lockout_seconds=300
-rate_limit_state=/home/ubuntu/.local/state/lumen-terminal/login-rates
-audit_log=/home/ubuntu/.local/state/lumen-terminal/security-audit.log
-passkey_store=/home/ubuntu/.local/state/lumen-terminal/passkeys
-totp_secret_file=/home/ubuntu/.local/state/lumen-terminal/totp-secret
-preferences_file=/home/ubuntu/.local/state/lumen-terminal/preferences.json
+rate_limit_state=/var/lib/lumen-terminal/login-rates
+audit_log=/var/lib/lumen-terminal/security-audit.log
+passkey_store=/var/lib/lumen-terminal/passkeys
+totp_secret_file=/var/lib/lumen-terminal/totp-secret
+preferences_file=/var/lib/lumen-terminal/preferences.json
 max_connections_per_ip=4
 ws_max_attempts=20
 ws_rate_window_seconds=60
@@ -79,16 +83,18 @@ ws_rate_window_seconds=60
 `session` 模式包含：
 
 - PBKDF2-HMAC-SHA256 60 万次密码哈希和独立随机盐。
-- 签名的随机设备会话；不在浏览器存储密码或可供 JavaScript 读取的令牌。
+- 签名并在服务端登记的随机设备会话；不在浏览器存储密码或可供 JavaScript 读取的令牌。
 - `Secure`、`HttpOnly`、`SameSite=Strict`、host-only 持久 Cookie。
 - Host 白名单、同源 Origin 和双提交 CSRF 校验；隐私浏览器发送 `Origin: null` 时仍须通过完整 CSRF 校验。
 - 每个来源 IP 的持久化登录失败窗口，以及最长 24 小时的递增锁定。
-- 可在设置中启用 TOTP 动态验证码，或注册要求用户验证的 WebAuthn 通行密钥。
+- 可强制密码加 TOTP，或使用要求用户验证的 WebAuthn 通行密钥。
+- WebSocket 每 30 秒复验服务端会话，注销或超时后会主动断开。
+- root 会话使用 90 秒一次性票据，并绑定当前网页登录会话和目标会话 ID。
 - 每 IP WebSocket 并发与建连速率限制，以及不包含命令内容的安全审计日志。
 - CSP、禁止 iframe、禁缓存、MIME 嗅探防护等响应头。
 
-会话有效期默认为 30 天，每次正常打开页面会续期，所以经常使用的设备
-不会反复要求登录。丢失设备时可一次撤销全部设备会话：
+会话的绝对有效期默认为 12 小时，空闲超过 30 分钟失效，普通页面访问不会
+轮换或延长绝对期限。丢失设备时可一次撤销全部设备会话：
 
 ```bash
 sudo /opt/lumen-terminal/scripts/lumen-auth revoke-sessions
@@ -102,9 +108,10 @@ sudo /opt/lumen-terminal/scripts/lumen-auth set-password --generate
 sudo systemctl restart lumen-terminal
 ```
 
-明文密码只输出一次，配置文件仅保存哈希。安装后的策略文件使用
-`root:root 0600`：进程先读取它，随后清空附加组、永久降权为目标用户，
-并在开始监听前禁止进程 dump。终端 shell 无法读取认证密钥。
+明文密码只输出一次，配置文件仅保存哈希。Web 层、PTY 管理层与终端 shell
+分别使用 `lumen-web`、`lumen-pty` 和指定的普通 Linux 用户。策略文件为
+`root:lumen-web 0640`，可变认证数据位于 `/var/lib/lumen-terminal`；
+终端 shell 用户无法读取或修改这些数据。
 
 ## 三种安全策略
 
@@ -162,8 +169,8 @@ sudo ./scripts/bootstrap-debian.sh ubuntu terminal.example.com \
 把 `ubuntu` 换成实际运行 shell 的现有非 root Linux 用户，把
 `terminal.example.com` 换成浏览器访问时使用的 Host。命令完成后会打印
 首次登录的随机密码；明文只显示一次。默认只监听回环地址，需要按
-`deploy/README.md` 配置 HTTPS 反向代理。确实需要免密码 root 权限时，
-再显式加上 `--allow-sudo`。
+`deploy/README.md` 配置 HTTPS 反向代理。浏览器 shell 不安装 sudo 规则，
+主机管理应使用独立的 SSH 或控制台身份。
 
 如果希望手动管理软件包，Ubuntu/Debian 构建依赖如下：
 
@@ -189,8 +196,7 @@ make check
 sudo ./scripts/install.sh ubuntu terminal.example.com \
   --listen lo \
   --port 7681 \
-  --client-ip-header X-Real-IP \
-  --allow-sudo
+  --client-ip-header X-Real-IP
 ```
 
 安装器分别管理 `lumen-terminal.service`（认证、HTTP、WebSocket）和
@@ -209,17 +215,17 @@ sudo ./scripts/install.sh ubuntu terminal.example.com \
   --listen lo \
   --port 7681 \
   --client-ip-header X-Real-IP \
-  --allow-sudo \
   --replace-legacy-sessions
 ```
 
 这个参数会停止并移除旧 tmux service，只用于一次性清理；后续更新不要再使用。
 
 首次安装会生成账号同名、随机密码的 session 策略，并只显示一次密码。
-实际 shell 以该非 root Linux 用户运行；网页登录账号与 Linux 用户可以
-不同。`--allow-sudo` 会为 shell 用户安装显式的 `NOPASSWD: ALL` 规则，
-因此 `sudo <command>` 和 `sudo -i` 都无需再次输入密码。网页登录凭据一旦
-泄露也将意味着完整 root 权限，应只在确实需要时启用。
+普通 shell 以该非 root Linux 用户运行；网页登录账号与 Linux 用户可以
+不同。PTY 服务启用 `NoNewPrivileges` 且能力边界为空，即使该 Linux 用户
+在其他入口拥有 sudo 权限，普通浏览器终端也不能通过 setuid 提升为 root。
+右键标签栏可显式创建 root 会话；它需要重新验证 TOTP 或通行密钥，并由
+独立的 `lumen-root-pty.service` 承载，不会改变普通 “+” 按钮的权限。
 
 监听地址、端口、最大连接数和认证配置路径保存在
 `/etc/lumen-terminal/runtime.env`，无需修改 systemd 单元。仓库中的
@@ -300,10 +306,10 @@ Codex 的 `/theme` 只选择代码语法高亮主题；输入栏等主界面颜�
   其本身没有 Node、数据库、容器或终端渲染器。
 - 前端在大量输出时会暂停 PTY 读取，等 xterm.js 消化后恢复。
 - WebGL 不可用或上下文丢失时自动退回 xterm.js DOM 渲染。
-- 认证进程读取 root-only 配置后永久降权到 shell 用户；基础部署允许
-  `sudo`/setuid 提权。若某个环境不需要 root，可把
-  `deploy/no-root-hardening.conf` 安装为 systemd drop-in，恢复
-  `NoNewPrivileges` 和文件系统/内核沙箱。
+- Web、PTY 管理与 shell 使用三个独立账号；PTY 管理进程只保留派生普通
+  shell 和终止子进程所需的能力，执行 shell 前会清空附加组和全部能力。
+- shell 服务设置 `NoNewPrivileges`，安装器不会创建 sudo 规则；主机管理
+  应使用浏览器终端之外的独立 SSH 或控制台身份。
 - 使用系统字体，避免传输和常驻完整 CJK Web Font。
 
 终端中的命令、编辑器和语言服务仍可能占用大量资源；这些不属于 Lumen

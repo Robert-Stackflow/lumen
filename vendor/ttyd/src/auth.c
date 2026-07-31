@@ -195,7 +195,8 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
   }
   auth->mode = LUMEN_AUTH_SESSION;
   auth->session_generation = 1;
-  auth->session_ttl = 180 * 24 * 60 * 60LL;
+  auth->session_ttl = 12 * 60 * 60LL;
+  auth->session_idle_timeout = 30 * 60;
   auth->cookie_secure = true;
   auth->login_max_failures = 5;
   auth->login_window = 300;
@@ -268,6 +269,27 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
         goto fail;
       }
       auth->session_ttl = days * 24 * 60 * 60;
+    } else if (!strcmp(key, "session_ttl_seconds")) {
+      if (!parse_i64(value, 300, 3650LL * 24 * 60 * 60, &auth->session_ttl)) {
+        snprintf(error, error_len, "invalid session_ttl_seconds on line %d", line_number);
+        goto fail;
+      }
+    } else if (!strcmp(key, "session_idle_seconds")) {
+      if (!parse_i64(value, 60, 30LL * 24 * 60 * 60, &auth->session_idle_timeout)) {
+        snprintf(error, error_len, "invalid session_idle_seconds on line %d", line_number);
+        goto fail;
+      }
+    } else if (!strcmp(key, "session_store")) {
+      if (*value != '/' || strlen(value) >= sizeof(auth->session_store)) {
+        snprintf(error, error_len, "invalid session_store on line %d", line_number);
+        goto fail;
+      }
+      snprintf(auth->session_store, sizeof(auth->session_store), "%s", value);
+    } else if (!strcmp(key, "require_mfa")) {
+      if (!parse_bool(value, &auth->require_mfa)) {
+        snprintf(error, error_len, "invalid require_mfa on line %d", line_number);
+        goto fail;
+      }
     } else if (!strcmp(key, "cookie_secure")) {
       if (!parse_bool(value, &auth->cookie_secure)) {
         snprintf(error, error_len, "invalid cookie_secure on line %d", line_number);
@@ -416,6 +438,39 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
       fclose(totp);
     }
   }
+  if (auth->session_store[0]) {
+    FILE *sessions = fopen(auth->session_store, "r");
+    if (sessions) {
+      int64_t now = (int64_t)time(NULL);
+      size_t index = 0;
+      while (index < LUMEN_MAX_SESSIONS) {
+        struct lumen_session session = {0};
+        char extra = '\0';
+        long long issued = 0, expires = 0, last_seen = 0;
+        int matched =
+            fscanf(sessions, "%64[0-9a-f] %lld %lld %lld%c", session.id, &issued, &expires, &last_seen, &extra);
+        if (matched == EOF) break;
+        if (matched != 5 || (extra != '\n' && extra != '\r') ||
+            strlen(session.id) != LUMEN_SESSION_ID_LEN) {
+          int ch;
+          while ((ch = fgetc(sessions)) != '\n' && ch != EOF) {}
+          continue;
+        }
+        session.issued = (int64_t)issued;
+        session.expires = (int64_t)expires;
+        session.last_seen = (int64_t)last_seen;
+        if (session.expires > now && now - session.last_seen <= auth->session_idle_timeout)
+          auth->sessions[index++] = session;
+      }
+      fclose(sessions);
+    }
+  }
+  if (auth->mode == LUMEN_AUTH_SESSION && auth->require_mfa && !auth->totp_secret_len &&
+      !lumen_auth_has_passkeys(auth)) {
+    snprintf(error, error_len, "require_mfa needs an enrolled TOTP authenticator or passkey");
+    lumen_auth_free(auth);
+    return -1;
+  }
   *result = auth;
   return 0;
 
@@ -476,7 +531,61 @@ bool lumen_auth_cookie_value(const char *cookies, const char *name, char *value,
   return false;
 }
 
-static bool session_token_valid(struct lumen_auth *auth, const char *token) {
+static bool valid_session_id(const char *id) {
+  if (!id || strlen(id) != LUMEN_SESSION_ID_LEN) return false;
+  for (const char *cursor = id; *cursor; cursor++)
+    if (!isxdigit((unsigned char)*cursor) || isupper((unsigned char)*cursor)) return false;
+  return true;
+}
+
+static bool save_sessions(struct lumen_auth *auth) {
+  if (!auth->session_store[0]) return true;
+  char temporary[sizeof(auth->session_store) + 32];
+  if (snprintf(temporary, sizeof(temporary), "%s.tmp.%ld", auth->session_store, (long)getpid()) <= 0) return false;
+  FILE *file = fopen(temporary, "w");
+  if (!file) return false;
+  chmod(temporary, 0600);
+  bool ok = true;
+  for (size_t i = 0; i < LUMEN_MAX_SESSIONS; i++) {
+    const struct lumen_session *session = &auth->sessions[i];
+    if (!session->id[0]) continue;
+    if (fprintf(file, "%s %lld %lld %lld\n", session->id, (long long)session->issued,
+                (long long)session->expires, (long long)session->last_seen) < 0) {
+      ok = false;
+      break;
+    }
+  }
+  if (fclose(file) != 0) ok = false;
+  if (ok && rename(temporary, auth->session_store) == 0) return true;
+  unlink(temporary);
+  return false;
+}
+
+static struct lumen_session *find_session(struct lumen_auth *auth, const char *id) {
+  if (!valid_session_id(id)) return NULL;
+  for (size_t i = 0; i < LUMEN_MAX_SESSIONS; i++)
+    if (auth->sessions[i].id[0] && !strcmp(auth->sessions[i].id, id)) return &auth->sessions[i];
+  return NULL;
+}
+
+bool lumen_auth_session_active(struct lumen_auth *auth, const char *session_id, bool touch) {
+  if (!auth || auth->mode != LUMEN_AUTH_SESSION) return auth && auth->mode != LUMEN_AUTH_SESSION;
+  struct lumen_session *session = find_session(auth, session_id);
+  if (!session) return false;
+  int64_t now = (int64_t)time(NULL);
+  if (session->expires <= now || now - session->last_seen > auth->session_idle_timeout) {
+    OPENSSL_cleanse(session, sizeof(*session));
+    save_sessions(auth);
+    return false;
+  }
+  if (touch && now - session->last_seen >= 60) {
+    session->last_seen = now;
+    save_sessions(auth);
+  }
+  return true;
+}
+
+static bool session_token_valid(struct lumen_auth *auth, const char *token, char *session_id, size_t session_id_len) {
   if (strlen(token) >= TOKEN_MAX_LEN) return false;
   char copy[TOKEN_MAX_LEN];
   snprintf(copy, sizeof(copy), "%s", token);
@@ -503,11 +612,15 @@ static bool session_token_valid(struct lumen_auth *auth, const char *token) {
     return false;
 
   int64_t now = (int64_t)time(NULL);
-  return generation == auth->session_generation && issued <= now + 300 && expires > now && expires > issued &&
-         expires - issued <= auth->session_ttl;
+  bool valid = generation == auth->session_generation && issued <= now + 300 && expires > now && expires > issued &&
+               expires - issued <= auth->session_ttl && lumen_auth_session_active(auth, nonce, true);
+  if (valid && session_id && session_id_len > LUMEN_SESSION_ID_LEN)
+    snprintf(session_id, session_id_len, "%s", nonce);
+  return valid;
 }
 
-bool lumen_auth_request_user(struct lumen_auth *auth, struct lws *wsi, char *user, size_t user_len) {
+bool lumen_auth_request_user_session(struct lumen_auth *auth, struct lws *wsi, char *user, size_t user_len,
+                                     char *session_id, size_t session_id_len) {
   if (!auth || auth->mode == LUMEN_AUTH_OFF) return true;
   if (!lumen_auth_host_allowed(auth, wsi)) return false;
   if (auth->mode == LUMEN_AUTH_PROXY) {
@@ -523,12 +636,35 @@ bool lumen_auth_request_user(struct lumen_auth *auth, struct lws *wsi, char *use
   int copied = lws_hdr_copy(wsi, cookies, cookies_len + 1, WSI_TOKEN_HTTP_COOKIE);
   bool valid = copied == cookies_len &&
                lumen_auth_cookie_value(cookies, lumen_auth_session_cookie_name(auth), token, sizeof(token)) &&
-               session_token_valid(auth, token);
+               session_token_valid(auth, token, session_id, session_id_len);
   OPENSSL_cleanse(cookies, (size_t)cookies_len + 1);
   free(cookies);
   if (!valid) return false;
   snprintf(user, user_len, "%s", auth->username);
   return true;
+}
+
+bool lumen_auth_request_user(struct lumen_auth *auth, struct lws *wsi, char *user, size_t user_len) {
+  return lumen_auth_request_user_session(auth, wsi, user, user_len, NULL, 0);
+}
+
+bool lumen_auth_revoke_request_session(struct lumen_auth *auth, struct lws *wsi) {
+  if (!auth || auth->mode != LUMEN_AUTH_SESSION) return false;
+  int cookies_len = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_COOKIE);
+  if (cookies_len <= 0 || cookies_len > 65535) return false;
+  char *cookies = malloc((size_t)cookies_len + 1);
+  if (!cookies) return false;
+  char token[TOKEN_MAX_LEN] = "", session_id[LUMEN_SESSION_ID_LEN + 1] = "";
+  int copied = lws_hdr_copy(wsi, cookies, cookies_len + 1, WSI_TOKEN_HTTP_COOKIE);
+  bool valid = copied == cookies_len &&
+               lumen_auth_cookie_value(cookies, lumen_auth_session_cookie_name(auth), token, sizeof(token)) &&
+               session_token_valid(auth, token, session_id, sizeof(session_id));
+  OPENSSL_cleanse(cookies, (size_t)cookies_len + 1);
+  free(cookies);
+  struct lumen_session *session = valid ? find_session(auth, session_id) : NULL;
+  if (!session) return false;
+  memset(session, 0, sizeof(*session));
+  return save_sessions(auth);
 }
 
 bool lumen_auth_origin_valid(struct lumen_auth *auth, const char *origin, const char *host) {
@@ -841,6 +977,7 @@ bool lumen_auth_totp_confirm(struct lumen_auth *auth, const char *client, const 
 bool lumen_auth_totp_remove(struct lumen_auth *auth, const char *client, const char *code) {
   int64_t now = (int64_t)time(NULL);
   if (!auth || !auth->totp_secret_len || !totp_valid(auth, code, now)) return false;
+  if (auth->require_mfa && !lumen_auth_has_passkeys(auth)) return false;
   if (unlink(auth->totp_secret_file) != 0 && errno != ENOENT) return false;
   OPENSSL_cleanse(auth->totp_secret, sizeof(auth->totp_secret));
   auth->totp_secret_len = 0;
@@ -850,6 +987,58 @@ bool lumen_auth_totp_remove(struct lumen_auth *auth, const char *client, const c
 
 bool lumen_auth_totp_enabled(struct lumen_auth *auth) {
   return auth && auth->totp_secret_len > 0;
+}
+
+bool lumen_auth_totp_verify(struct lumen_auth *auth, const char *code) {
+  return auth && auth->totp_secret_len && totp_valid(auth, code, (int64_t)time(NULL));
+}
+
+static bool privileged_terminal_id(const char *id) {
+  return id && strlen(id) == 6 && !strncmp(id, "root-", 5) && id[5] >= '1' && id[5] <= '8';
+}
+
+bool lumen_auth_issue_privileged_grant(struct lumen_auth *auth, const char *auth_session,
+                                       const char *terminal_id, bool create, char token[65]) {
+  if (!auth || !auth_session || strlen(auth_session) != LUMEN_SESSION_ID_LEN ||
+      !privileged_terminal_id(terminal_id) ||
+      !lumen_auth_session_active(auth, auth_session, true))
+    return false;
+  unsigned char random[32];
+  if (RAND_bytes(random, sizeof(random)) != 1) return false;
+  int64_t now = (int64_t)time(NULL);
+  struct lumen_privileged_grant *slot = NULL;
+  for (size_t i = 0; i < LUMEN_PRIVILEGED_GRANTS; i++) {
+    if (auth->privileged_grants[i].expires <= now) {
+      slot = &auth->privileged_grants[i];
+      break;
+    }
+  }
+  if (!slot) return false;
+  OPENSSL_cleanse(slot, sizeof(*slot));
+  snprintf(slot->auth_session, sizeof(slot->auth_session), "%s", auth_session);
+  snprintf(slot->terminal_id, sizeof(slot->terminal_id), "%s", terminal_id);
+  hex_encode(random, sizeof(random), slot->token);
+  slot->expires = now + 90;
+  slot->create = create;
+  snprintf(token, 65, "%s", slot->token);
+  return true;
+}
+
+bool lumen_auth_consume_privileged_grant(struct lumen_auth *auth, const char *auth_session,
+                                         const char *terminal_id, const char *token, bool *create) {
+  if (!auth || !auth_session || !terminal_id || !token || strlen(token) != 64) return false;
+  int64_t now = (int64_t)time(NULL);
+  for (size_t i = 0; i < LUMEN_PRIVILEGED_GRANTS; i++) {
+    struct lumen_privileged_grant *slot = &auth->privileged_grants[i];
+    if (slot->expires <= now || strcmp(slot->auth_session, auth_session) ||
+        strcmp(slot->terminal_id, terminal_id) ||
+        CRYPTO_memcmp(slot->token, token, 64))
+      continue;
+    if (create) *create = slot->create;
+    OPENSSL_cleanse(slot, sizeof(*slot));
+    return lumen_auth_session_active(auth, auth_session, true);
+  }
+  return false;
 }
 
 static struct lumen_login_rate *rate_entry(struct lumen_auth *auth, const char *client, int64_t now) {
@@ -873,6 +1062,7 @@ static struct lumen_login_rate *rate_entry(struct lumen_auth *auth, const char *
 enum lumen_login_result lumen_auth_login(struct lumen_auth *auth, const char *client, const char *username,
                                          const char *password, const char *totp, int64_t *retry_after) {
   if (!auth || auth->mode != LUMEN_AUTH_SESSION) return LUMEN_LOGIN_ERROR;
+  if (auth->require_mfa && !auth->totp_secret_len) return LUMEN_LOGIN_MFA_REQUIRED;
   int64_t now = (int64_t)time(NULL);
   struct lumen_login_rate *rate = rate_entry(auth, client, now);
   if (rate->locked_until > now) {
@@ -933,6 +1123,18 @@ int lumen_auth_new_session_cookie(struct lumen_auth *auth, char *header, size_t 
   hex_encode(nonce, sizeof(nonce), nonce_hex);
 
   int64_t now = (int64_t)time(NULL);
+  struct lumen_session *slot = NULL;
+  for (size_t i = 0; i < LUMEN_MAX_SESSIONS; i++) {
+    struct lumen_session *candidate = &auth->sessions[i];
+    if (!candidate->id[0] || candidate->expires <= now ||
+        now - candidate->last_seen > auth->session_idle_timeout) {
+      slot = candidate;
+      break;
+    }
+    if (!slot || candidate->last_seen < slot->last_seen) slot = candidate;
+  }
+  if (!slot) return -1;
+
   char payload[160];
   int payload_len =
       snprintf(payload, sizeof(payload), "v1.%u.%lld.%lld.%s", auth->session_generation, (long long)now,
@@ -951,8 +1153,20 @@ int lumen_auth_new_session_cookie(struct lumen_auth *auth, char *header, size_t 
   char token[TOKEN_MAX_LEN];
   int token_len = snprintf(token, sizeof(token), "%s.%s", payload, digest_hex);
   if (token_len <= 0 || (size_t)token_len >= sizeof(token)) return -1;
-  return make_cookie_header(auth, lumen_auth_session_cookie_name(auth), token, auth->session_ttl, true, header,
-                            header_len);
+  int written = make_cookie_header(auth, lumen_auth_session_cookie_name(auth), token, auth->session_ttl, true, header,
+                                   header_len);
+  if (written <= 0 || (size_t)written >= header_len) return -1;
+
+  struct lumen_session previous = *slot;
+  snprintf(slot->id, sizeof(slot->id), "%s", nonce_hex);
+  slot->issued = now;
+  slot->expires = now + auth->session_ttl;
+  slot->last_seen = now;
+  if (!save_sessions(auth)) {
+    *slot = previous;
+    return -1;
+  }
+  return written;
 }
 
 int lumen_auth_clear_session_cookie(struct lumen_auth *auth, char *header, size_t header_len) {

@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import secrets
+import shutil
 import stat
 import tempfile
 
@@ -22,6 +23,10 @@ KEY_ORDER = (
     "session_secret",
     "session_generation",
     "session_ttl_days",
+    "session_ttl_seconds",
+    "session_idle_seconds",
+    "session_store",
+    "require_mfa",
     "cookie_secure",
     "allowed_host",
     "proxy_header",
@@ -110,7 +115,10 @@ def init(args: argparse.Namespace) -> None:
         "password_hash": password_hash(password),
         "session_secret": secrets.token_hex(32),
         "session_generation": "1",
-        "session_ttl_days": str(args.session_days),
+        "session_ttl_seconds": str(args.session_hours * 60 * 60),
+        "session_idle_seconds": str(args.session_idle_minutes * 60),
+        "session_store": str(args.state_dir / "sessions"),
+        "require_mfa": "false",
         "cookie_secure": "false" if args.insecure_cookie else "true",
         "allowed_host": args.host,
         "proxy_header": "X-Remote-User",
@@ -173,6 +181,39 @@ def set_mode(args: argparse.Namespace) -> None:
     print("Restart lumen-terminal to activate the policy.")
 
 
+def relocate_state(args: argparse.Namespace) -> None:
+    values = read_config(args.config)
+    args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths = {
+        "rate_limit_state": "login-rates",
+        "audit_log": "security-audit.log",
+        "passkey_store": "passkeys",
+        "totp_secret_file": "totp-secret",
+        "preferences_file": "preferences.json",
+        "session_store": "sessions",
+    }
+    for key, filename in paths.items():
+        destination = args.state_dir / filename
+        source_value = values.get(key, "")
+        source = Path(source_value) if source_value else None
+        if source and source != destination and source.is_file() and not destination.exists():
+            shutil.copy2(source, destination)
+        values[key] = str(destination)
+        if destination.exists():
+            destination.chmod(0o600)
+    write_config(args.config, values)
+
+
+def set_session_policy(args: argparse.Namespace) -> None:
+    values = read_config(args.config)
+    values["session_ttl_seconds"] = str(args.absolute_hours * 60 * 60)
+    values["session_idle_seconds"] = str(args.idle_minutes * 60)
+    if args.require_mfa is not None:
+        values["require_mfa"] = "true" if args.require_mfa else "false"
+    write_config(args.config, values)
+    print("Restart Lumen's web service to activate the session policy.")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
@@ -181,7 +222,8 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     create.add_argument("--username", required=True)
     create.add_argument("--host", required=True)
-    create.add_argument("--session-days", type=int, default=30)
+    create.add_argument("--session-hours", type=int, default=12)
+    create.add_argument("--session-idle-minutes", type=int, default=30)
     create.add_argument("--state-dir", type=Path, required=True)
     create.add_argument("--client-ip-header", default="")
     create.add_argument("--insecure-cookie", action="store_true")
@@ -207,6 +249,20 @@ def parser() -> argparse.ArgumentParser:
     cookie.add_argument("--secure-cookie", dest="cookie_secure", action="store_true")
     cookie.add_argument("--insecure-cookie", dest="cookie_secure", action="store_false")
     mode.set_defaults(handler=set_mode, cookie_secure=None)
+
+    relocate = subcommands.add_parser("relocate-state", help="move mutable authentication state")
+    relocate.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    relocate.add_argument("--state-dir", type=Path, required=True)
+    relocate.set_defaults(handler=relocate_state)
+
+    sessions = subcommands.add_parser("set-session-policy", help="configure login session timeouts and MFA")
+    sessions.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    sessions.add_argument("--absolute-hours", type=int, choices=range(1, 24 * 30 + 1), default=12)
+    sessions.add_argument("--idle-minutes", type=int, choices=range(1, 24 * 60 + 1), default=30)
+    mfa = sessions.add_mutually_exclusive_group()
+    mfa.add_argument("--require-mfa", dest="require_mfa", action="store_true")
+    mfa.add_argument("--allow-password-only", dest="require_mfa", action="store_false")
+    sessions.set_defaults(handler=set_session_policy, require_mfa=None)
     return root
 
 

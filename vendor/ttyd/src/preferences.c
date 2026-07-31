@@ -1,6 +1,7 @@
 #include "auth.h"
 
 #include <json-c/json.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <stdio.h>
@@ -147,6 +148,9 @@ static json_object *normalize_preferences(const char *json) {
                add_string(source, target, "workingDirectory", 240, NULL, 0) &&
                add_boolean(source, target, "inheritWorkingDirectory") &&
                add_boolean(source, target, "persistTerminalState") &&
+               add_integer(source, target, "rootMaxSessions", 1, 8) &&
+               add_boolean(source, target, "defaultRootSession") &&
+               add_boolean(source, target, "rootRequireVerification") &&
                add_session_notes(source, target) &&
                add_command_snippets(source, target) &&
                add_string(source, target, "theme", 16, themes, 3);
@@ -169,6 +173,30 @@ static json_object *normalize_preferences(const char *json) {
     return NULL;
   }
   return target;
+}
+
+void lumen_auth_privileged_preferences(struct lumen_auth *auth, unsigned int default_max_sessions,
+                                        unsigned int *max_sessions, bool *require_verification) {
+  unsigned int effective_max = default_max_sessions >= 1 && default_max_sessions <= 8
+                                   ? default_max_sessions : 2;
+  bool effective_verification = true;
+  char *raw = lumen_auth_preferences_get(auth, NULL);
+  json_object *preferences = raw ? json_tokener_parse(raw) : NULL;
+  free(raw);
+  if (preferences && json_object_is_type(preferences, json_type_object)) {
+    json_object *value = NULL;
+    if (json_object_object_get_ex(preferences, "rootMaxSessions", &value) &&
+        json_object_is_type(value, json_type_int)) {
+      int configured = json_object_get_int(value);
+      if (configured >= 1 && configured <= 8) effective_max = (unsigned int)configured;
+    }
+    if (json_object_object_get_ex(preferences, "rootRequireVerification", &value) &&
+        json_object_is_type(value, json_type_boolean))
+      effective_verification = json_object_get_boolean(value);
+  }
+  if (preferences) json_object_put(preferences);
+  if (max_sessions) *max_sessions = effective_max;
+  if (require_verification) *require_verification = effective_verification;
 }
 
 static uint64_t preferences_version(struct lumen_auth *auth) {
@@ -215,7 +243,19 @@ bool lumen_auth_preferences_set(struct lumen_auth *auth, const char *json, bool 
   if (!json_object_object_get_ex(request, "patch", &patch)) patch = request;
   if (!json_object_is_type(patch, json_type_object)) goto fail;
   if (json_object_object_get_ex(request, "baseVersion", &base_version_object)) {
-    uint64_t expected = (uint64_t)json_object_get_int64(base_version_object);
+    uint64_t expected = 0;
+    if (json_object_is_type(base_version_object, json_type_string)) {
+      const char *text = json_object_get_string(base_version_object);
+      char *end = NULL;
+      errno = 0;
+      unsigned long long parsed = strtoull(text, &end, 10);
+      if (errno || !text[0] || !end || *end) goto fail;
+      expected = (uint64_t)parsed;
+    } else if (json_object_is_type(base_version_object, json_type_int)) {
+      expected = (uint64_t)json_object_get_int64(base_version_object);
+    } else {
+      goto fail;
+    }
     uint64_t current = preferences_version(auth);
     if (expected != current) {
       if (conflict) *conflict = true;

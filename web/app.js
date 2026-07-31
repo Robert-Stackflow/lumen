@@ -8,6 +8,7 @@
   const FLOW_LIMIT = 100000;
   const FLOW_HIGH_WATER = 10;
   const FLOW_LOW_WATER = 4;
+  const HEALTH_REFRESH_INTERVAL = 3000;
   const MAX_CLIPBOARD_BYTES = 1024 * 1024;
   const MAX_CLIPBOARD_BASE64 = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4;
   const {
@@ -120,6 +121,9 @@
   const themeButton = document.getElementById('theme-toggle');
   const focusButton = document.getElementById('focus-toggle');
   const settingsButton = document.getElementById('settings-toggle');
+  const healthMonitorButton = document.getElementById('health-monitor-toggle');
+  const healthMonitorPopover = document.getElementById('health-monitor-popover');
+  const tabSessionPopover = document.getElementById('tab-session-popover');
   const settingsDialog = document.getElementById('settings-dialog');
   const copySelectionSetting = document.getElementById('setting-copy-selection');
   const fontSizeSetting = document.getElementById('setting-font-size');
@@ -138,6 +142,9 @@
   const workingDirectorySetting = document.getElementById('setting-working-directory');
   const inheritWorkingDirectorySetting = document.getElementById('setting-inherit-working-directory');
   const persistTerminalStateSetting = document.getElementById('setting-persist-terminal-state');
+  const rootMaxSessionsSetting = document.getElementById('setting-root-max-sessions');
+  const defaultRootSessionSetting = document.getElementById('setting-default-root-session');
+  const rootRequireVerificationSetting = document.getElementById('setting-root-require-verification');
   const shortcutSearchSetting = document.getElementById('setting-shortcut-search');
   const shortcutNewTabSetting = document.getElementById('setting-shortcut-new-tab');
   const exportTerminalButton = document.getElementById('export-terminal');
@@ -224,6 +231,7 @@
   );
   const encodeBase64Url = value => btoa(String.fromCharCode(...new Uint8Array(value)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const isReservedRootSessionId = value => /^root-[1-8]$/.test(String(value || ''));
   let activeId = null;
   let editingSnippetId = null;
   let tokenPromise = null;
@@ -232,17 +240,19 @@
   let preferencesReady = false;
   let preferencesDirty = false;
   let lastSyncedPreferences = null;
-  let preferencesVersion = 0;
+  let preferencesVersion = '0';
   let pingSequence = 0;
   let mobileCtrl = false;
   let pendingCloseId = null;
   let pendingForceTerminate = false;
   let websocketReconnectCount = 0;
   let latestHealthReport = null;
+  let latestHealthCards = [];
   let sessionActionPending = false;
   let pendingConnection = null;
   let contextMenuRestoreFocus = null;
   let sessionInventory = [];
+  let sessionInventoryUpdatedAt = 0;
   let auditEntries = [];
   let auditEventCategory = 'all';
   let auditTimeRange = 'all';
@@ -254,9 +264,13 @@
   const sessionNoteSaveTimers = new Map();
   const defaultFontSize = window.matchMedia('(max-width: 560px)').matches ? 13 : 14;
   let settings = loadSettings();
+  let tabPopoverTimer = null;
+  let hoveredTabId = null;
+  const popoverHideTimers = new WeakMap();
   let activeSettingsTab = 'general';
   let totpEnabled = false;
   let pendingPasskeyAction = null;
+  let privilegedPolicy = { maxSessions: 2, idleSeconds: 1800, requireVerification: true };
   const storedTheme = localStorage.getItem(THEME_KEY);
   const systemThemeQuery = window.matchMedia('(prefers-color-scheme: light)');
   let followsSystemTheme = storedTheme !== 'light' && storedTheme !== 'dark';
@@ -280,6 +294,9 @@
       workingDirectory: '/home/ubuntu',
       inheritWorkingDirectory: true,
       persistTerminalState: true,
+      rootMaxSessions: 2,
+      defaultRootSession: false,
+      rootRequireVerification: true,
       idleCleanupSeconds: 1800,
       sessionNotes: {},
       commandSnippets: [],
@@ -314,6 +331,13 @@
           ? saved.inheritWorkingDirectory : defaults.inheritWorkingDirectory,
         persistTerminalState: typeof saved?.persistTerminalState === 'boolean'
           ? saved.persistTerminalState : defaults.persistTerminalState,
+        rootMaxSessions: Number.isInteger(saved?.rootMaxSessions)
+          && saved.rootMaxSessions >= 1 && saved.rootMaxSessions <= 8
+          ? saved.rootMaxSessions : defaults.rootMaxSessions,
+        defaultRootSession: typeof saved?.defaultRootSession === 'boolean'
+          ? saved.defaultRootSession : defaults.defaultRootSession,
+        rootRequireVerification: typeof saved?.rootRequireVerification === 'boolean'
+          ? saved.rootRequireVerification : defaults.rootRequireVerification,
         idleCleanupSeconds: [1800, 3600, 21600, 86400].includes(Number(saved?.idleCleanupSeconds))
           ? Number(saved.idleCleanupSeconds) : defaults.idleCleanupSeconds,
         sessionNotes: saved?.sessionNotes && typeof saved.sessionNotes === 'object'
@@ -374,7 +398,7 @@
         }
         if (!response.ok) throw new Error(`preferences update ${response.status}`);
         const saved = await response.json();
-        preferencesVersion = Number(saved.version || preferencesVersion);
+        preferencesVersion = String(saved.version || preferencesVersion);
         lastSyncedPreferences = { ...(lastSyncedPreferences || {}), ...patch };
         preferencesDirty = Object.keys(
           preferencePatch(preferencesPayload(), lastSyncedPreferences),
@@ -396,14 +420,22 @@
       });
       if (!response.ok) throw new Error(`preferences returned ${response.status}`);
       const remote = await response.json();
-      preferencesVersion = Number(remote?._version || 0);
+      preferencesVersion = String(remote?._version || '0');
       delete remote._version;
       const hasRemote = remote && typeof remote === 'object' && Object.keys(remote).length > 0;
       if (hasRemote) lastSyncedPreferences = structuredClone(remote);
       if (hasRemote && !preferencesDirty) {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(remote));
+        const hydratedRemote = { ...remote };
+        let migratedRootPreferences = false;
+        for (const key of ['rootMaxSessions', 'defaultRootSession', 'rootRequireVerification']) {
+          if (Object.hasOwn(remote, key)) continue;
+          hydratedRemote[key] = settings[key];
+          migratedRootPreferences = true;
+        }
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(hydratedRemote));
         settings = loadSettings();
-        const remoteTheme = ['dark', 'light', 'system'].includes(remote.theme) ? remote.theme : 'system';
+        const remoteTheme = ['dark', 'light', 'system'].includes(hydratedRemote.theme)
+          ? hydratedRemote.theme : 'system';
         followsSystemTheme = remoteTheme === 'system';
         if (followsSystemTheme) {
           localStorage.removeItem(THEME_KEY);
@@ -414,6 +446,7 @@
         }
         syncSettingsControls();
         applyTerminalAppearance();
+        if (migratedRootPreferences) preferencesDirty = true;
       }
       preferencesReady = true;
       if (!hasRemote || preferencesDirty) schedulePreferencesSave();
@@ -748,6 +781,8 @@
       id: session.id,
       name: session.name,
       pinned: session.pinned,
+      privileged: session.privileged,
+      privilegedMode: session.privilegedMode,
     }));
     const split = splitLayout.serialize();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeId, split }));
@@ -764,6 +799,8 @@
               id: tab.id,
               name: String(tab.name || tab.id).slice(0, 32),
               pinned: Boolean(tab.pinned),
+              privileged: tab.privileged === true && isReservedRootSessionId(tab.id),
+              privilegedMode: tab.privilegedMode === 'create' ? 'create' : 'connect',
             }))
         : [];
       if (validTabs.length) {
@@ -788,7 +825,13 @@
     } catch {
       localStorage.removeItem(STORAGE_KEY);
     }
-    return { tabs: [{ id: 'main', name: 'main' }], activeId: 'main', split: null };
+    return settings.defaultRootSession
+      ? {
+        tabs: [{ id: 'root-1', name: 'root 1', privileged: true, privilegedMode: 'create' }],
+        activeId: 'root-1',
+        split: null,
+      }
+      : { tabs: [{ id: 'main', name: 'main' }], activeId: 'main', split: null };
   }
 
   function nextTab() {
@@ -823,14 +866,159 @@
     return tokenPromise;
   }
 
-  function websocketUrl(id, connectionKey, skipReplay = false, readOnly = false) {
+  function websocketUrl(id, connectionKey, skipReplay = false, readOnly = false, privilegedGrant = '') {
     return globalThis.LumenTerminalConnection.websocketUrl(
-      window.location, basePath, id, connectionKey, skipReplay, readOnly,
+      window.location, basePath, id, connectionKey, skipReplay, readOnly, privilegedGrant,
     );
   }
 
+  function isTerminalHandshakeResponse(data) {
+    return typeof data === 'string'
+      && /^(?:\x1b\[[>?=]?[0-9;]+c)+$/.test(data);
+  }
+
+  async function loadPrivilegedMethods(session) {
+    if (session.privilegedMethods) return session.privilegedMethods;
+    const response = await fetch(`${basePath}/api/privileged/methods`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`methods ${response.status}`);
+    const methods = await response.json();
+    privilegedPolicy = {
+      maxSessions: Math.max(1, Math.min(8, Number(methods.maxSessions) || 2)),
+      idleSeconds: Math.max(300, Math.min(86400, Number(methods.idleSeconds) || 1800)),
+      requireVerification: methods.requireVerification !== false,
+    };
+    session.privilegedMethods = methods;
+    return methods;
+  }
+
+  async function showPrivilegedGate(session) {
+    if (!session?.privileged || session.destroyed) return;
+    session.privilegedGate.hidden = true;
+    session.mount.classList.add('is-privileged-locked');
+    session.privilegedGateError.hidden = true;
+    session.privilegedGateDescription.textContent =
+      `${session.privilegedMode === 'create' ? '创建' : '连接'} ${session.id} 前需要重新验证。`;
+    try {
+      const methods = await loadPrivilegedMethods(session);
+      session.privilegedTotpField.hidden = !methods.totp;
+      session.privilegedTotpButton.hidden = !methods.totp;
+      session.privilegedPasskeyButton.hidden = !methods.passkey;
+      session.privilegedGatePolicy.textContent =
+        `最多 ${privilegedPolicy.maxSessions} 个 root 会话 · 空闲约 ${Math.round(privilegedPolicy.idleSeconds / 60)} 分钟后自动结束`;
+      if (!privilegedPolicy.requireVerification) {
+        session.privilegedGateDescription.textContent = `正在安全连接 ${session.id}…`;
+        session.privilegedTotpField.hidden = true;
+        session.privilegedTotpButton.hidden = true;
+        session.privilegedPasskeyButton.hidden = true;
+        await authorizePrivilegedGate(session, 'policy');
+        return;
+      }
+      session.privilegedGate.hidden = false;
+      if (!methods.totp && !methods.passkey) {
+        session.privilegedGateError.textContent = '请先在安全设置中启用 TOTP 或添加通行密钥。';
+        session.privilegedGateError.hidden = false;
+      } else if (session.id === activeId && methods.totp) {
+        requestAnimationFrame(() => session.privilegedTotpCode.focus());
+      }
+    } catch (error) {
+      session.privilegedGate.hidden = false;
+      session.privilegedGateError.textContent = '无法读取特权验证方式，请稍后重试。';
+      session.privilegedGateError.hidden = false;
+      globalThis.LumenDiagnostics.report('特权验证', error);
+    }
+  }
+
+  async function authorizePrivilegedGate(session, method) {
+    if (!session || session.authorizationPending
+        || method !== 'policy' && session.id !== activeId) return;
+    session.authorizationPending = true;
+    session.privilegedGateError.hidden = true;
+    session.privilegedTotpButton.disabled = true;
+    session.privilegedPasskeyButton.disabled = true;
+    try {
+      let body;
+      let endpoint;
+      let headers = {
+        'X-Lumen-Action': 'privileged-authorize',
+        'X-Lumen-Session': session.id,
+        'X-Lumen-Mode': session.privilegedMode,
+      };
+      if (method === 'passkey') {
+        const optionsResponse = await fetch(`${basePath}/api/privileged/passkey/options`, {
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        if (!optionsResponse.ok) throw new Error(`options ${optionsResponse.status}`);
+        const options = await optionsResponse.json();
+        options.challenge = decodeBase64Url(options.challenge);
+        options.allowCredentials = options.allowCredentials.map(item => ({
+          ...item,
+          id: decodeBase64Url(item.id),
+        }));
+        const credential = await navigator.credentials.get({ publicKey: options });
+        body = JSON.stringify({
+          id: encodeBase64Url(credential.rawId),
+          clientDataJSON: encodeBase64Url(credential.response.clientDataJSON),
+          authenticatorData: encodeBase64Url(credential.response.authenticatorData),
+          signature: encodeBase64Url(credential.response.signature),
+        });
+        headers = { ...headers, 'Content-Type': 'application/json' };
+        endpoint = 'passkey/verify';
+      } else if (method === 'totp') {
+        const code = session.privilegedTotpCode.value.replace(/\D/g, '');
+        if (code.length !== 6) {
+          session.privilegedGateError.textContent = '请输入六位动态验证码。';
+          session.privilegedGateError.hidden = false;
+          session.privilegedTotpCode.focus();
+          return;
+        }
+        body = new URLSearchParams({ code }).toString();
+        headers = { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' };
+        endpoint = 'authorize/totp';
+      } else {
+        endpoint = 'authorize';
+      }
+      const response = await fetch(`${basePath}/api/privileged/${endpoint}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+        body,
+      });
+      if (!response.ok) throw new Error(`authorize ${response.status}`);
+      const result = await response.json();
+      if (!/^[0-9a-f]{64}$/.test(result.grant || '')) throw new Error('invalid grant');
+      session.privilegedGrant = result.grant;
+      session.privilegedMode = 'connect';
+      session.privilegedTotpCode.value = '';
+      session.privilegedGate.hidden = true;
+      session.mount.classList.remove('is-privileged-locked');
+      void connect(session);
+    } catch (error) {
+      const backgroundPolicyAuthorization = method === 'policy' && session.id !== activeId;
+      if (method === 'policy') session.privilegedGate.hidden = backgroundPolicyAuthorization;
+      session.privilegedGateError.textContent = error?.name === 'NotAllowedError'
+        ? '通行密钥验证已取消。'
+        : method === 'policy'
+          ? '无法授权 root 会话，请稍后重试。'
+          : '验证失败，请检查验证码或通行密钥后重试。';
+      session.privilegedGateError.hidden = false;
+      if (backgroundPolicyAuthorization && !session.destroyed) {
+        session.reconnectAttempts += 1;
+        scheduleReconnect(session);
+      }
+    } finally {
+      session.authorizationPending = false;
+      session.privilegedTotpButton.disabled = false;
+      session.privilegedPasskeyButton.disabled = false;
+    }
+  }
+
   function scheduleTerminalSnapshot(session) {
-    if (!settings.persistTerminalState || !session.serializeAddon || session.destroyed || session.restoring) return;
+    if (session.privileged || !settings.persistTerminalState || !session.serializeAddon ||
+        session.destroyed || session.restoring) return;
     clearTimeout(session.snapshotTimer);
     session.snapshotTimer = setTimeout(() => {
       const persist = async () => {
@@ -855,7 +1043,7 @@
   }
 
   async function restoreTerminalSnapshot(session) {
-    if (!settings.persistTerminalState) return false;
+    if (session.privileged || !settings.persistTerminalState) return false;
     try {
       const snapshot = await globalThis.LumenTerminalState.load(session.id);
       if (!snapshot?.data || typeof snapshot.data !== 'string') return false;
@@ -885,7 +1073,7 @@
     if (state !== 'online') {
       session.latency.textContent = state === 'connecting' ? '···' : '—';
       session.latency.dataset.quality = '';
-      session.latency.title = state === 'connecting' ? '正在连接' : '连接已断开';
+      session.latency.setAttribute('aria-label', state === 'connecting' ? '正在连接' : '连接已断开');
       session.pendingPing = null;
     }
   }
@@ -901,7 +1089,8 @@
       : session.smoothedLatency < 180
         ? 'fair'
         : 'poor';
-    session.latency.title = `当前 ${Math.round(milliseconds)} ms · 平滑 ${Math.round(session.smoothedLatency)} ms`;
+    session.latency.setAttribute('aria-label',
+      `当前 ${Math.round(milliseconds)} 毫秒，平滑 ${Math.round(session.smoothedLatency)} 毫秒`);
     session.tab.setAttribute(
       'aria-label',
       `${session.name}，已连接，延迟 ${Math.round(milliseconds)} 毫秒`,
@@ -987,7 +1176,7 @@
       case COMMAND.SET_TITLE: {
         const title = decoder.decode(data).replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 120);
         session.remoteTitle = title;
-        session.tab.title = title || session.name;
+        session.tab.dataset.sessionTitle = title || session.name;
         if (session.id === activeId && title) document.title = `${session.name} — Lumen`;
         break;
       }
@@ -1012,6 +1201,23 @@
     if (session.destroyed) return;
     clearTimeout(session.reconnectTimer);
     if (session.socket && session.socket.readyState < WebSocket.CLOSING) session.socket.close();
+
+    if (session.privileged && !session.privilegedGrant) {
+      setConnectionState(session, 'offline');
+      if (session.id !== activeId) {
+        try {
+          const methods = await loadPrivilegedMethods(session);
+          if (methods.requireVerification !== false) return;
+        } catch (error) {
+          session.reconnectAttempts += 1;
+          scheduleReconnect(session);
+          globalThis.LumenDiagnostics.report('特权验证', error);
+          return;
+        }
+      }
+      await showPrivilegedGate(session);
+      return;
+    }
     setConnectionState(session, 'connecting');
 
     let token = '';
@@ -1028,10 +1234,12 @@
 
     if (session.destroyed) return;
     const socket = new WebSocket(
-      websocketUrl(session.id, session.connectionKey, session.hasTerminalState, session.readOnly),
+      websocketUrl(session.id, session.connectionKey, session.hasTerminalState, session.readOnly,
+        session.privilegedGrant),
       ['tty'],
     );
     session.socket = socket;
+    session.privilegedGrant = null;
     socket.binaryType = 'arraybuffer';
 
     socket.addEventListener('open', () => {
@@ -1039,6 +1247,11 @@
       const recovered = session.hasConnected && session.reconnectAttempts > 0;
       session.reconnectAttempts = 0;
       session.hasConnected = true;
+      if (session.privileged) {
+        session.privilegedMode = 'connect';
+        session.privilegedGate.hidden = true;
+        session.mount.classList.remove('is-privileged-locked');
+      }
       setConnectionState(session, 'online');
       const init = JSON.stringify({
         AuthToken: token,
@@ -1071,6 +1284,19 @@
     socket.addEventListener('close', event => {
       if (session.destroyed || socket !== session.socket) return;
       setConnectionState(session, 'offline');
+      if (session.privileged) {
+        clearTimeout(session.reconnectTimer);
+        if (session.privilegedMethods?.requireVerification === false) {
+          session.reconnectAttempts += 1;
+          scheduleReconnect(session);
+          return;
+        }
+        if (session.id === activeId) {
+          void showPrivilegedGate(session);
+          showToast(`“${session.name}”需要重新验证后才能连接`);
+        }
+        return;
+      }
       if (event.code === 4001) {
         clearTimeout(session.reconnectTimer);
         showToast(`“${session.name}”的连接已被管理员断开，刷新页面可重新连接`);
@@ -1135,6 +1361,11 @@
     name.className = 'tab-name';
     name.textContent = session.name;
 
+    const rootBadge = document.createElement('span');
+    rootBadge.className = 'root-badge';
+    rootBadge.textContent = 'ROOT';
+    rootBadge.hidden = !session.privileged;
+
     const latency = document.createElement('span');
     latency.className = 'latency';
     latency.textContent = '···';
@@ -1158,7 +1389,8 @@
     close.setAttribute('aria-label', `关闭或结束 ${session.name}`);
     close.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>';
 
-    tab.append(dot, name, latency, connections, protection, close);
+    tab.classList.toggle('is-privileged', session.privileged);
+    tab.append(dot, name, rootBadge, latency, connections, protection, close);
     tab.addEventListener('click', event => {
       if (!event.target.closest('.close-tab, .tab-name-input')) activateSession(session.id);
     });
@@ -1166,6 +1398,23 @@
       if (event.target.closest('.close-tab, .tab-name-input')) return;
       event.preventDefault();
       requestCloseSession(session.id);
+    });
+    latency.addEventListener('pointerenter', () => {
+      hoveredTabId = session.id;
+      clearTimeout(tabPopoverTimer);
+      tabPopoverTimer = setTimeout(() => {
+        if (hoveredTabId !== session.id) return;
+        renderTabSessionPopover(session);
+        if (Date.now() - sessionInventoryUpdatedAt < 3000) return;
+        void refreshSessionInventory().then(() => {
+          if (hoveredTabId === session.id) renderTabSessionPopover(session);
+        });
+      }, 320);
+    });
+    latency.addEventListener('pointerleave', () => {
+      if (hoveredTabId === session.id) hoveredTabId = null;
+      clearTimeout(tabPopoverTimer);
+      hideHoverPopover(tabSessionPopover);
     });
     tab.addEventListener('contextmenu', event => {
       showContextMenu(event, tabContextItems(session), () => session.term.focus());
@@ -1194,6 +1443,83 @@
     return tab;
   }
 
+  function positionHoverPopover(popover, anchor) {
+    clearTimeout(popoverHideTimers.get(popover));
+    popover.classList.remove('is-closing');
+    popover.hidden = false;
+    const anchorRect = anchor.getBoundingClientRect();
+    // These layout dimensions stay stable while the entrance animation scales
+    // the bubble; getBoundingClientRect would make a refresh shift it.
+    const popoverWidth = popover.offsetWidth;
+    const popoverHeight = popover.offsetHeight;
+    const left = Math.min(window.innerWidth - popoverWidth - 12,
+      Math.max(12, anchorRect.left + anchorRect.width / 2 - popoverWidth / 2));
+    const top = Math.min(window.innerHeight - popoverHeight - 12, anchorRect.bottom + 8);
+    popover.style.left = `${left}px`;
+    popover.style.top = `${Math.max(12, top)}px`;
+    const arrowX = Math.min(popoverWidth - 20,
+      Math.max(20, anchorRect.left + anchorRect.width / 2 - left));
+    popover.style.setProperty('--popover-arrow-x', `${arrowX}px`);
+  }
+
+  function cancelHideHoverPopover(popover) {
+    clearTimeout(popoverHideTimers.get(popover));
+    popoverHideTimers.delete(popover);
+    popover.classList.remove('is-closing');
+  }
+
+  function hideHoverPopover(popover, immediate = false) {
+    clearTimeout(popoverHideTimers.get(popover));
+    if (immediate || popover.hidden) {
+      popover.classList.remove('is-closing');
+      popover.hidden = true;
+      return;
+    }
+    const delayTimer = setTimeout(() => {
+      popover.classList.add('is-closing');
+      const finishTimer = setTimeout(() => {
+        popover.hidden = true;
+        popover.classList.remove('is-closing');
+        popoverHideTimers.delete(popover);
+      }, 110);
+      popoverHideTimers.set(popover, finishTimer);
+    }, 90);
+    popoverHideTimers.set(popover, delayTimer);
+  }
+
+  function renderTabSessionPopover(session) {
+    if (!session?.tab?.isConnected) return;
+    const item = sessionInventory.find(candidate => candidate.id === session.id);
+    const createdAt = Number(item?.createdAt || 0) * 1000;
+    const memory = Number(item?.memoryKb || 0);
+    const details = [
+      ['身份', session.privileged ? 'root · 特权会话' : 'ubuntu · 普通会话'],
+      ['状态', session.state === 'online' ? '已连接' : session.state === 'connecting' ? '连接中' : '离线'],
+      ['连接', `${Number(item?.clients || 0)} 个客户端`],
+      ['运行时间', createdAt ? formatDuration(Date.now() - createdAt) : '等待后台数据'],
+      ['CPU', item ? `${Number(item.cpuPercent || 0).toFixed(1)}%` : '—'],
+      ['内存', memory ? `${(memory / 1024).toFixed(memory >= 10240 ? 0 : 1)} MiB` : '—'],
+      ['前台进程', item?.foregroundCommand || '—'],
+      ['工作目录', item?.workingDirectory || session.currentWorkingDirectory || '—'],
+      ['保护', item?.protected ? '已保护' : '未保护'],
+    ];
+    tabSessionPopover.dataset.state = session.state;
+    tabSessionPopover.innerHTML = '<header><span><i class="session-popover-dot"></i><strong></strong></span><small></small></header><div class="tab-session-details"></div>';
+    tabSessionPopover.querySelector('strong').textContent = session.name;
+    tabSessionPopover.querySelector('header small').textContent = session.id;
+    const list = tabSessionPopover.querySelector('.tab-session-details');
+    for (const [label, value] of details) {
+      const row = document.createElement('div');
+      const term = document.createElement('span');
+      const description = document.createElement('strong');
+      term.textContent = label;
+      description.textContent = value;
+      row.append(term, description);
+      list.append(row);
+    }
+    positionHoverPopover(tabSessionPopover, session.latency);
+  }
+
   function beginRename(session) {
     if (session.nameNode.querySelector('input')) return;
     const input = document.createElement('input');
@@ -1217,7 +1543,11 @@
       );
       if (session.id === activeId) document.title = `${session.name} — Lumen`;
       saveState();
-      session.term.focus();
+      if (session.privilegedGate && !session.privilegedGate.hidden) {
+        session.privilegedTotpCode.focus();
+      } else {
+        session.term.focus();
+      }
     };
 
     input.addEventListener('blur', () => finish(true), { once: true });
@@ -1270,6 +1600,11 @@
       remoteTitle: '',
       hasConnected: false,
       pinned: Boolean(meta.pinned),
+      privileged: meta.privileged === true && isReservedRootSessionId(meta.id),
+      privilegedGrant: meta.privilegedGrant || null,
+      privilegedMode: meta.privilegedMode === 'create' ? 'create' : 'connect',
+      privilegedMethods: null,
+      authorizationPending: false,
       protected: false,
       readOnly: false,
       hasTerminalState: false,
@@ -1292,6 +1627,7 @@
     pane.setAttribute('aria-hidden', 'true');
     const mount = document.createElement('div');
     mount.className = 'terminal-mount';
+    session.mount = mount;
     const modeNotice = document.createElement('div');
     modeNotice.className = 'terminal-pane-mode';
     modeNotice.setAttribute('role', 'status');
@@ -1299,6 +1635,50 @@
     modeNotice.textContent = '只读模式 · 键盘输入不会发送到会话';
     pane.append(mount);
     pane.append(modeNotice);
+    if (session.privileged) {
+      const gate = document.createElement('div');
+      gate.className = 'privileged-gate';
+      gate.hidden = true;
+      gate.innerHTML = `
+        <div class="privileged-gate-card">
+          <div class="privileged-gate-heading">
+            <span class="privileged-gate-mark" aria-hidden="true">!</span>
+            <div><span>Privileged session</span><h2>验证后进入 root 会话</h2></div>
+          </div>
+          <p class="privileged-gate-description"></p>
+          <div class="privileged-gate-warning">root 会话拥有完整系统权限，创建、连接和结束操作都会写入安全审计日志。</div>
+          <label class="privileged-gate-totp"><span>动态验证码</span><input type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></label>
+          <p class="privileged-gate-error" role="alert" hidden></p>
+          <small class="privileged-gate-policy"></small>
+          <div class="privileged-gate-actions">
+            <button class="privileged-gate-back" type="button">返回普通终端</button>
+            <button class="privileged-gate-passkey" type="button">使用通行密钥</button>
+            <button class="privileged-gate-submit" type="button">验证并连接</button>
+          </div>
+        </div>`;
+      pane.append(gate);
+      session.privilegedGate = gate;
+      session.privilegedGateDescription = gate.querySelector('.privileged-gate-description');
+      session.privilegedGateError = gate.querySelector('.privileged-gate-error');
+      session.privilegedGatePolicy = gate.querySelector('.privileged-gate-policy');
+      session.privilegedTotpField = gate.querySelector('.privileged-gate-totp');
+      session.privilegedTotpCode = gate.querySelector('.privileged-gate-totp input');
+      session.privilegedTotpButton = gate.querySelector('.privileged-gate-submit');
+      session.privilegedPasskeyButton = gate.querySelector('.privileged-gate-passkey');
+      session.privilegedTotpButton.addEventListener('click', () => void authorizePrivilegedGate(session, 'totp'));
+      session.privilegedPasskeyButton.addEventListener('click', () => void authorizePrivilegedGate(session, 'passkey'));
+      session.privilegedTotpCode.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          void authorizePrivilegedGate(session, 'totp');
+        }
+      });
+      gate.querySelector('.privileged-gate-back').addEventListener('click', () => {
+        const ordinary = [...sessions.values()].find(candidate => !candidate.privileged && !candidate.destroyed);
+        if (ordinary) activateSession(ordinary.id);
+        else addSession();
+      });
+    }
     stage.append(pane);
     session.pane = pane;
     session.modeNotice = modeNotice;
@@ -1324,7 +1704,7 @@
         if (directory.startsWith('/') && directory.length <= 240) {
           session.currentWorkingDirectory = directory;
           session.tab.dataset.cwd = directory;
-          session.tab.title = `${session.name} · ${directory}`;
+          session.tab.dataset.sessionTitle = `${session.name} · ${directory}`;
         }
       } catch {
         // Ignore malformed working-directory reports from terminal programs.
@@ -1379,7 +1759,7 @@
     installSelectionOverlay(session);
 
     term.onData(data => {
-      if (!session.restoring) sendInput(session, data);
+      if (!session.restoring && !isTerminalHandshakeResponse(data)) sendInput(session, data);
     });
     term.onBinary(data => {
       if (!session.restoring) {
@@ -1474,9 +1854,16 @@
         scheduleResize(sessions.get(splitLayout.primaryId));
         scheduleResize(sessions.get(splitLayout.secondaryId));
       }
-      session.term.focus();
+      if (session.privilegedGate && !session.privilegedGate.hidden) {
+        session.privilegedTotpCode.focus();
+      } else {
+        session.term.focus();
+      }
     });
     saveState();
+    if (session.privileged && session.state === 'offline' && !session.authorizationPending) {
+      void connect(session);
+    }
   }
 
   function toggleSplitSession(session, direction = splitLayout.direction) {
@@ -1635,7 +2022,8 @@
     button.innerHTML = session.pinned
       ? '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2.2h4M4.7 2.2v2L3.6 6h4.8L7.3 4.2v-2M6 6v3.8"/></svg>'
       : '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>';
-    session.tab.title = session.pinned ? `${session.name} · 已固定` : session.remoteTitle || session.name;
+    session.tab.dataset.sessionTitle = session.pinned
+      ? `${session.name} · 已固定` : session.remoteTitle || session.name;
   }
 
   function setSessionReadOnly(session, readOnly) {
@@ -1759,6 +2147,52 @@
           : settings.workingDirectory;
       createSession(meta, true);
     }
+  }
+
+  function addDefaultSession() {
+    if (settings.defaultRootSession) void addRootSession();
+    else addSession();
+  }
+
+  async function addRootSession() {
+    if (sessions.size >= MAX_TABS) {
+      showToast(`轻量模式最多同时打开 ${MAX_TABS} 个终端`);
+      return;
+    }
+    await refreshSessionInventory();
+    const occupied = new Set([
+      ...sessionInventory.filter(item => item.privileged === true).map(item => item.id),
+      ...[...sessions.values()].filter(item => item.privileged).map(item => item.id),
+    ]);
+    let id = null;
+    let methods;
+    try {
+      methods = await fetch(`${basePath}/api/privileged/methods`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      }).then(response => response.ok ? response.json() : Promise.reject(new Error('policy')));
+      privilegedPolicy.maxSessions = Math.max(1, Math.min(8, Number(methods.maxSessions) || 2));
+      privilegedPolicy.requireVerification = methods.requireVerification !== false;
+    } catch {
+      showToast('无法读取 root 会话安全策略');
+      return;
+    }
+    for (let number = 1; number <= privilegedPolicy.maxSessions; number += 1) {
+      if (!occupied.has(`root-${number}`)) {
+        id = `root-${number}`;
+        break;
+      }
+    }
+    if (!id) {
+      showToast(`最多同时保留 ${privilegedPolicy.maxSessions} 个 root 会话，请先结束一个`);
+      return;
+    }
+    createSession({
+      id,
+      name: `root ${id.slice(5)}`,
+      privileged: true,
+      privilegedMode: 'create',
+    }, true);
   }
 
   async function toggleFullscreen() {
@@ -1944,6 +2378,7 @@
       {
         label: session.protected ? '取消保护会话' : '保护会话',
         icon: session.protected ? 'unprotect' : 'protect',
+        disabled: session.privileged,
         action: () => void setSessionProtected(session.id, !session.protected),
       },
       {
@@ -2021,6 +2456,8 @@
   function stripContextItems() {
     return [
       { label: '新建终端', icon: 'add', shortcut: settings.shortcuts.newTab, action: addSession },
+      { label: '新建 root 会话', icon: 'protect', danger: true, action: () => void addRootSession() },
+      { separator: true },
       {
         label: '管理会话',
         icon: 'sessions',
@@ -2092,23 +2529,35 @@
       const inventory = await response.json();
       if (!Array.isArray(inventory)) throw new Error('invalid session list');
       sessionInventory = inventory;
+      sessionInventoryUpdatedAt = Date.now();
       const byId = new Map(inventory.map(item => [item.id, item]));
+      let privilegeStateChanged = false;
       for (const session of sessions.values()) {
         const item = byId.get(session.id);
         const count = Number(item?.clients || 0);
+        if (item && session.privileged !== (item.privileged === true)) {
+          session.privileged = item.privileged === true;
+          privilegeStateChanged = true;
+        }
         session.protected = Boolean(item?.protected);
+        session.tab.classList.toggle('is-privileged', session.privileged);
+        const rootBadge = session.tab.querySelector('.root-badge');
+        if (rootBadge) rootBadge.hidden = !session.privileged;
         session.tab.classList.toggle('is-protected', session.protected);
         session.tab.querySelector('.tab-protection').hidden = !session.protected;
         session.connections.textContent = count > 9 ? '9+' : String(count);
         session.connections.hidden = count < 2;
         session.connections.title = `当前 ${count} 个连接`;
       }
+      if (privilegeStateChanged) saveState();
       if (activeSettingsTab === 'sessions' && settingsDialog.open) {
         renderIdleCleanupPreview();
         renderSessionManager();
       }
+      return inventory;
     } catch (error) {
       console.warn('[lumen] could not refresh sessions', error);
+      return null;
     }
   }
 
@@ -2167,6 +2616,12 @@
       copy.innerHTML = '<strong></strong><small></small><small class="session-runtime"></small>';
       const title = copy.querySelector('strong');
       title.textContent = session?.name || item.id;
+      if (item.privileged === true) {
+        const rootBadge = document.createElement('span');
+        rootBadge.className = 'session-root-badge';
+        rootBadge.textContent = 'ROOT';
+        title.append(rootBadge);
+      }
       const countBadge = document.createElement('span');
       countBadge.className = 'session-count-badge';
       countBadge.textContent = `${item.clients} 个连接`;
@@ -2214,7 +2669,11 @@
       activate.addEventListener('click', () => {
         settingsDialog.close();
         if (session) activateSession(session.id);
-        else createSession({ id: item.id, name: item.id }, true);
+        else createSession({
+          id: item.id,
+          name: item.id,
+          privileged: item.privileged === true,
+        }, true);
       });
       const terminate = document.createElement('button');
       terminate.type = 'button';
@@ -2227,6 +2686,8 @@
       const protect = document.createElement('button');
       protect.type = 'button';
       protect.textContent = item.protected ? '取消保护' : '保护';
+      protect.disabled = item.privileged === true;
+      if (protect.disabled) protect.title = 'root 会话始终受强制空闲回收策略约束';
       protect.addEventListener('click', () => void setSessionProtected(item.id, !item.protected));
       const actions = document.createElement('span');
       actions.className = 'session-manager-actions';
@@ -2315,15 +2776,18 @@
       if (!sessionInventory.some(item => item.id === id)) selectedSessionIds.delete(id);
     }
     const selected = sessionInventory.filter(item => selectedSessionIds.has(item.id));
+    const protectable = selected.filter(item => item.privileged !== true);
     sessionSelectionCount.textContent = selected.length ? `已选择 ${selected.length} 个会话` : '未选择会话';
-    document.getElementById('protect-selected-sessions').disabled = !selected.length;
-    document.getElementById('unprotect-selected-sessions').disabled = !selected.length;
+    document.getElementById('protect-selected-sessions').disabled = !protectable.length;
+    document.getElementById('unprotect-selected-sessions').disabled = !protectable.length;
     document.getElementById('terminate-selected-sessions').disabled =
       !selected.some(item => Number(item.clients) === 0 && !item.protected);
   }
 
   async function setSelectedSessionsProtected(protectedSession) {
-    const ids = [...selectedSessionIds];
+    const ids = sessionInventory
+      .filter(item => selectedSessionIds.has(item.id) && item.privileged !== true)
+      .map(item => item.id);
     for (const id of ids) await setSessionProtected(id, protectedSession, true);
     showToast(`已${protectedSession ? '保护' : '取消保护'} ${ids.length} 个会话`);
   }
@@ -2519,16 +2983,18 @@
         { name: 'Web', status: health.web?.status, detail: `运行 ${formatDuration(Number(health.web?.uptimeSeconds || 0) * 1000)} · 内存 ${(Number(health.web?.memoryKb || 0) / 1024).toFixed(1)} MiB` },
         { name: 'PTY', status: ptyStatus, detail: `${Number(health.pty?.sessions || 0)} 个会话 · 响应 ${ptyLatency} ms` },
         { name: 'WebSocket', status: websocketReconnectCount >= 20 ? 'critical' : websocketReconnectCount >= 5 ? 'warning' : health.websocket?.status, detail: `${Number(health.websocket?.connections || 0)} 个活动连接 · 本页重连 ${websocketReconnectCount} 次` },
-        { name: 'tmux', status: health.tmux?.status, detail: `${Number(health.tmux?.sessions || 0)} 个持久会话 · 实际命令探测` },
+        { name: 'tmux', status: health.tmux?.status, detail: `${Number(health.tmux?.sessions || 0)} 个持久会话 · PTY supervisor 校验` },
         { name: '主机内存', status: resourceStatus(memoryPercent), detail: `${formatResourceBytes(health.memory?.usedBytes)} / ${formatResourceBytes(health.memory?.totalBytes)}`, percent: memoryPercent },
         { name: '磁盘', status: diskStatus, detail: `${formatResourceBytes(health.disk?.usedBytes)} / ${formatResourceBytes(health.disk?.totalBytes)}`, percent: diskPercent },
       ];
+      latestHealthCards = cards;
       const severity = cards.some(card => card.status === 'critical' || card.status === 'error')
         ? 'critical' : cards.some(card => card.status === 'warning') ? 'warning' : 'ok';
       settingsButton.classList.toggle('has-health-warning', severity !== 'ok');
       settingsButton.dataset.healthStatus = severity;
+      healthMonitorButton.dataset.healthStatus = severity;
       serviceHealthSummary.textContent =
-        `${severity === 'ok' ? '所有服务正常' : severity === 'warning' ? '检测到资源预警' : '检测到服务异常'} · 每 5 秒自动刷新`
+        `${severity === 'ok' ? '所有服务正常' : severity === 'warning' ? '检测到资源预警' : '检测到服务异常'} · 每 3 秒自动刷新`
         + (recentError ? ` · 最近异常 ${formatDateTime(recentError.timestamp)}` : '');
       serviceHealthGrid.replaceChildren(...cards.map(cardData => {
         const card = document.createElement('article');
@@ -2545,13 +3011,42 @@
             : cardData.status === 'warning' ? '预警' : '异常';
         return card;
       }));
+      if (!healthMonitorPopover.hidden) renderHealthMonitorPopover();
     } catch (error) {
       settingsButton.classList.add('has-health-warning');
       settingsButton.dataset.healthStatus = 'critical';
+      healthMonitorButton.dataset.healthStatus = 'critical';
       globalThis.LumenDiagnostics.report('服务健康', error);
       if (activeSettingsTab === 'health' && settingsDialog.open)
         serviceHealthGrid.innerHTML = '<div class="session-manager-loading">无法读取服务状态</div>';
     }
+  }
+
+  function renderHealthMonitorPopover() {
+    const status = healthMonitorButton.dataset.healthStatus || 'unknown';
+    healthMonitorPopover.dataset.status = status;
+    const header = healthMonitorPopover.querySelector('header');
+    header.dataset.status = status;
+    header.querySelector('small').textContent = !latestHealthCards.length
+      ? '正在读取…'
+      : status === 'ok' ? '全部正常' : status === 'warning' ? '存在预警' : '存在异常';
+    const list = healthMonitorPopover.querySelector('.health-monitor-list');
+    list.replaceChildren(...latestHealthCards.map(card => {
+      const row = document.createElement('div');
+      row.className = 'health-monitor-row';
+      row.dataset.status = card.status || 'unknown';
+      row.innerHTML = '<i class="health-dot"></i><strong></strong><small></small>';
+      row.querySelector('strong').textContent = card.name;
+      row.querySelector('small').textContent = card.detail;
+      row.querySelector('small').title = card.detail;
+      return row;
+    }));
+    positionHoverPopover(healthMonitorPopover, healthMonitorButton);
+  }
+
+  function openHealthMonitor() {
+    renderHealthMonitorPopover();
+    void refreshServiceHealth(false);
   }
 
   function copyServiceDiagnostics() {
@@ -2790,6 +3285,9 @@
     workingDirectorySetting.value = settings.workingDirectory;
     inheritWorkingDirectorySetting.checked = settings.inheritWorkingDirectory;
     persistTerminalStateSetting.checked = settings.persistTerminalState;
+    setCustomSelect(rootMaxSessionsSetting, String(settings.rootMaxSessions));
+    defaultRootSessionSetting.checked = settings.defaultRootSession;
+    rootRequireVerificationSetting.checked = settings.rootRequireVerification;
     setCustomSelect(idleCleanupThreshold, String(settings.idleCleanupSeconds));
     shortcutSearchSetting.value = settings.shortcuts.search;
     shortcutNewTabSetting.value = settings.shortcuts.newTab;
@@ -2997,12 +3495,38 @@
     mobileKeys.querySelector('[data-modifier="ctrl"]')?.classList.toggle('is-active', active);
   }
 
-  addButton.addEventListener('click', () => addSession());
+  addButton.addEventListener('click', addDefaultSession);
   tabStrip.addEventListener('contextmenu', event => {
     if (event.target.closest('.terminal-tab')) return;
     showContextMenu(event, stripContextItems(), () => sessions.get(activeId)?.term.focus());
   });
   settingsButton.addEventListener('click', openSettings);
+  healthMonitorButton.addEventListener('pointerenter', openHealthMonitor);
+  healthMonitorButton.addEventListener('pointerleave', () => {
+    hideHoverPopover(healthMonitorPopover);
+  });
+  healthMonitorButton.addEventListener('focus', openHealthMonitor);
+  healthMonitorButton.addEventListener('blur', () => {
+    hideHoverPopover(healthMonitorPopover);
+  });
+  healthMonitorButton.addEventListener('click', () => {
+    hideHoverPopover(healthMonitorPopover, true);
+    openSettings();
+    activateSettingsTab('health');
+  });
+  tabSessionPopover.addEventListener('pointerenter', () => {
+    cancelHideHoverPopover(tabSessionPopover);
+  });
+  tabSessionPopover.addEventListener('pointerleave', () => {
+    hideHoverPopover(tabSessionPopover);
+  });
+  healthMonitorPopover.addEventListener('pointerenter', () => {
+    cancelHideHoverPopover(healthMonitorPopover);
+  });
+  healthMonitorPopover.addEventListener('pointerleave', () => {
+    hideHoverPopover(healthMonitorPopover);
+  });
+  healthMonitorPopover.addEventListener('click', () => healthMonitorButton.click());
   for (const tab of settingsTabs) {
     tab.addEventListener('click', () => activateSettingsTab(tab.dataset.settingsTab));
     tab.addEventListener('keydown', event => {
@@ -3229,6 +3753,25 @@
     settings.persistTerminalState = persistTerminalStateSetting.checked;
     if (!settings.persistTerminalState) void globalThis.LumenTerminalState.clear();
     saveSettings();
+  });
+  installCustomSelect(rootMaxSessionsSetting, value => {
+    settings.rootMaxSessions = Math.max(1, Math.min(8, Number(value) || 2));
+    privilegedPolicy.maxSessions = settings.rootMaxSessions;
+    for (const session of sessions.values()) session.privilegedMethods = null;
+    saveSettings();
+  });
+  defaultRootSessionSetting.addEventListener('change', () => {
+    settings.defaultRootSession = defaultRootSessionSetting.checked;
+    saveSettings();
+  });
+  rootRequireVerificationSetting.addEventListener('change', () => {
+    settings.rootRequireVerification = rootRequireVerificationSetting.checked;
+    privilegedPolicy.requireVerification = settings.rootRequireVerification;
+    for (const session of sessions.values()) session.privilegedMethods = null;
+    saveSettings();
+    showToast(settings.rootRequireVerification
+      ? 'root 会话二次验证已启用'
+      : 'root 会话二次验证已关闭，请谨慎使用');
   });
   captureShortcut(shortcutSearchSetting, 'search');
   captureShortcut(shortcutNewTabSetting, 'newTab');
@@ -3488,7 +4031,7 @@
       || (event.metaKey && !event.shiftKey && event.code === 'KeyT');
     if (newTabShortcut) {
       event.preventDefault();
-      addSession();
+      addDefaultSession();
     }
     if (event.metaKey && !event.shiftKey && event.code === 'KeyW') {
       event.preventDefault();
@@ -3552,7 +4095,9 @@
   auditPoller.start(10000);
   const healthPoller = new AdaptivePoller(async () => {
     if (!document.hidden) await refreshServiceHealth(false);
-  }, () => activeSettingsTab === 'health' && settingsDialog.open ? 5000 : 30000);
+  }, () => activeSettingsTab === 'health' && settingsDialog.open || !healthMonitorPopover.hidden
+    ? HEALTH_REFRESH_INTERVAL
+    : 30000);
   healthPoller.start(1500);
 
   systemThemeQuery.addEventListener?.('change', event => {
@@ -3561,10 +4106,25 @@
 
   applyTheme(currentTheme, false);
   void globalThis.LumenTerminalState.purgeOlderThan(Date.now() - 24 * 60 * 60 * 1000);
-  const restored = loadState();
-  restored.tabs.forEach(tab => createSession(tab, false));
-  if (restored.split) splitLayout.restore(restored.split, new Set(sessions.keys()));
-  activateSession(restored.activeId);
-  void refreshSessionInventory();
-  void syncPreferences();
+  async function initializeSessions() {
+    await syncPreferences();
+    const restored = loadState();
+    const initialInventory = await refreshSessionInventory();
+    if (initialInventory) {
+      const byId = new Map(initialInventory.map(item => [item.id, item]));
+      for (const tab of restored.tabs) {
+        const item = byId.get(tab.id);
+        if (item) {
+          tab.privileged = item.privileged === true;
+          if (tab.privileged) tab.privilegedMode = 'connect';
+        } else if (tab.privileged) {
+          tab.privilegedMode = 'create';
+        }
+      }
+    }
+    restored.tabs.forEach(tab => createSession(tab, false));
+    if (restored.split) splitLayout.restore(restored.split, new Set(sessions.keys()));
+    activateSession(restored.activeId);
+  }
+  void initializeSessions();
 })();

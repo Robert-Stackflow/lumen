@@ -23,6 +23,18 @@ assert 'id="protect-selected-sessions"' in page
 assert 'id="terminate-selected-sessions"' in page
 assert "refreshServiceHealth" in app
 assert "copyServiceDiagnostics" in app
+assert 'id="health-monitor-toggle"' in page
+assert 'id="tab-session-popover"' in page
+assert "renderTabSessionPopover" in app
+assert "renderHealthMonitorPopover" in app
+assert 'id="setting-root-max-sessions"' in page
+assert 'id="setting-default-root-session"' in page
+assert 'id="setting-root-require-verification"' in page
+assert "rootMaxSessions" in app
+assert "rootRequireVerification" in app
+assert "isTerminalHandshakeResponse" in app
+assert "method !== 'policy' && session.id !== activeId" in app
+assert "session.privilegedMethods?.requireVerification === false" in app
 assert "websocketReconnectCount" in app
 assert "has-health-warning" in app
 assert "setSessionProtected" in app

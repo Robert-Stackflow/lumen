@@ -224,6 +224,11 @@ static bool valid_session_id(const char *session_id) {
   return true;
 }
 
+static bool privileged_session_id(const char *session_id) {
+  return session_id && strlen(session_id) == 6 && !strncmp(session_id, "root-", 5) &&
+         session_id[5] >= '1' && session_id[5] <= '8';
+}
+
 static bool action_request_valid(struct lws *wsi, const char *expected_action) {
   char action[32] = "", origin[512] = "", host[256] = "";
   if (lws_hdr_custom_copy(wsi, action, sizeof(action), "x-lumen-action:", 15) <= 0 ||
@@ -262,10 +267,14 @@ static int session_control(const char *operation, const char *session_id) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static int disconnect_client(const char *connection_id) {
+static int disconnect_client(const char *session_id, const char *connection_id) {
   pid_t pid = fork();
   if (pid < 0) return -1;
   if (pid == 0) {
+    if (privileged_session_id(session_id)) {
+      const char *socket = getenv("LUMEN_ROOT_PTY_SOCKET");
+      setenv("LUMEN_PTY_SOCKET", socket && socket[0] ? socket : "/run/lumen-root-terminal/pty.sock", 1);
+    }
     execl(server->command, server->command, "--disconnect", connection_id, (char *)NULL);
     _exit(127);
   }
@@ -276,7 +285,7 @@ static int disconnect_client(const char *connection_id) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static char *list_sessions(size_t *output_len) {
+static char *list_sessions_from_socket(const char *socket_path, size_t *output_len) {
   int fds[2];
   if (pipe(fds) != 0) return NULL;
   pid_t pid = fork();
@@ -289,6 +298,7 @@ static char *list_sessions(size_t *output_len) {
     close(fds[0]);
     if (dup2(fds[1], STDOUT_FILENO) < 0) _exit(127);
     close(fds[1]);
+    if (socket_path && socket_path[0]) setenv("LUMEN_PTY_SOCKET", socket_path, 1);
     execl(server->command, server->command, "--list-json", (char *)NULL);
     _exit(127);
   }
@@ -327,24 +337,92 @@ static char *list_sessions(size_t *output_len) {
   return body;
 }
 
-static bool probe_tmux(void) {
-  pid_t pid = fork();
-  if (pid < 0) return false;
-  if (pid == 0) {
-    int null_fd = open("/dev/null", O_WRONLY);
-    if (null_fd >= 0) {
-      dup2(null_fd, STDOUT_FILENO);
-      dup2(null_fd, STDERR_FILENO);
-      close(null_fd);
-    }
-    execlp("tmux", "tmux", "-L", "lumen", "list-sessions", (char *)NULL);
-    _exit(127);
+static char *list_sessions(size_t *output_len) {
+  const char *normal_socket = getenv("LUMEN_PTY_SOCKET");
+  const char *root_socket = getenv("LUMEN_ROOT_PTY_SOCKET");
+  size_t normal_len = 0, root_len = 0;
+  char *normal = list_sessions_from_socket(
+      normal_socket && normal_socket[0] ? normal_socket : "/run/lumen-terminal/pty.sock", &normal_len);
+  char *root = list_sessions_from_socket(
+      root_socket && root_socket[0] ? root_socket : "/run/lumen-root-terminal/pty.sock", &root_len);
+  if (!normal && !root) return NULL;
+  if (!normal) {
+    *output_len = root_len;
+    return root;
   }
-  int status = 0;
-  while (waitpid(pid, &status, 0) < 0) {
-    if (errno != EINTR) return false;
+  if (!root) {
+    *output_len = normal_len;
+    return normal;
   }
-  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  bool normal_items = normal_len > 2;
+  bool root_items = root_len > 2;
+  size_t combined_len = normal_len + root_len - 2 + (normal_items && root_items ? 1 : 0);
+  char *combined = malloc(combined_len + 1);
+  if (!combined) {
+    free(normal);
+    free(root);
+    return NULL;
+  }
+  size_t used = 0;
+  combined[used++] = '[';
+  if (normal_items) {
+    memcpy(combined + used, normal + 1, normal_len - 2);
+    used += normal_len - 2;
+  }
+  if (normal_items && root_items) combined[used++] = ',';
+  if (root_items) {
+    memcpy(combined + used, root + 1, root_len - 2);
+    used += root_len - 2;
+  }
+  combined[used++] = ']';
+  combined[used] = '\0';
+  free(normal);
+  free(root);
+  *output_len = used;
+  return combined;
+}
+
+static unsigned int configured_root_max_sessions(bool *require_verification) {
+  const char *configured = getenv("LUMEN_ROOT_MAX_SESSIONS");
+  unsigned int fallback = configured ? (unsigned int)strtoul(configured, NULL, 10) : 2;
+  if (fallback < 1 || fallback > 8) fallback = 2;
+  unsigned int maximum = fallback;
+  lumen_auth_privileged_preferences(server->auth, fallback, &maximum, require_verification);
+  return maximum;
+}
+
+static bool privileged_capacity_available(const char *terminal_id, unsigned int maximum,
+                                           bool *already_exists_out) {
+  size_t length = 0;
+  char *inventory = list_sessions(&length);
+  if (!inventory) return false;
+  json_object *sessions = json_tokener_parse(inventory);
+  free(inventory);
+  if (!sessions || !json_object_is_type(sessions, json_type_array)) {
+    if (sessions) json_object_put(sessions);
+    return false;
+  }
+  unsigned int count = 0;
+  bool already_exists = false;
+  for (size_t index = 0; index < json_object_array_length(sessions); index++) {
+    json_object *item = json_object_array_get_idx(sessions, index);
+    json_object *id = NULL, *privileged = NULL;
+    if (!json_object_is_type(item, json_type_object) ||
+        !json_object_object_get_ex(item, "id", &id) ||
+        !json_object_is_type(id, json_type_string))
+      continue;
+    const char *session_id = json_object_get_string(id);
+    bool is_privileged = privileged_session_id(session_id);
+    if (json_object_object_get_ex(item, "privileged", &privileged) &&
+        json_object_is_type(privileged, json_type_boolean))
+      is_privileged = json_object_get_boolean(privileged);
+    if (!is_privileged) continue;
+    count++;
+    if (!strcmp(session_id, terminal_id)) already_exists = true;
+  }
+  json_object_put(sessions);
+  if (already_exists_out) *already_exists_out = already_exists;
+  return already_exists || count < maximum;
 }
 
 static char *replace_template_token(char *source, const char *token, const char *value) {
@@ -620,9 +698,13 @@ static int complete_login(struct lws *wsi, struct pss_http *pss) {
   }
   lwsl_warn("LOGIN failed - %s\n", pss->client);
   const bool totp_failed = result == LUMEN_LOGIN_TOTP_INVALID;
-  lumen_auth_audit(server->auth, "login_failed", pss->client, totp_failed ? "totp" : "credentials");
+  const bool mfa_required = result == LUMEN_LOGIN_MFA_REQUIRED;
+  lumen_auth_audit(server->auth, "login_failed", pss->client,
+                   mfa_required ? "mfa-required" : (totp_failed ? "totp" : "credentials"));
   return serve_login(wsi, pss, HTTP_STATUS_UNAUTHORIZED,
-                     totp_failed ? "动态验证码不正确，请重新输入。" : "账号或密码不正确，请重试。",
+                     mfa_required ? "密码登录已禁用，请使用通行密钥登录。"
+                                  : (totp_failed ? "动态验证码不正确，请重新输入。"
+                                                 : "账号或密码不正确，请重试。"),
                      false, retry_after);
 }
 
@@ -653,6 +735,47 @@ static int complete_totp_confirm(struct lws *wsi, struct pss_http *pss) {
   return send_empty(wsi, valid ? 204 : HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
 }
 
+static int complete_privileged_grant(struct lws *wsi, struct pss_http *pss, const char *method) {
+  unsigned int maximum = configured_root_max_sessions(NULL);
+  bool already_exists = false;
+  if (!privileged_capacity_available(pss->terminal_id, maximum, &already_exists)) {
+    lumen_auth_audit(server->auth, "privileged_session_rejected", pss->client,
+                     "root-session-limit");
+    return send_empty(wsi, HTTP_STATUS_CONFLICT, NULL, NULL, NULL);
+  }
+  pss->privileged_create = !already_exists;
+  char grant[65] = "";
+  if (!lumen_auth_issue_privileged_grant(server->auth, pss->auth_session,
+                                          pss->terminal_id, pss->privileged_create, grant))
+    return send_empty(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL, NULL, NULL);
+  lumen_auth_audit(server->auth, "privileged_authorized", pss->client, method);
+  char *body = malloc(128);
+  if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+  int written = snprintf(body, 128, "{\"grant\":\"%s\",\"expiresIn\":90}", grant);
+  OPENSSL_cleanse(grant, sizeof(grant));
+  return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                   body, (size_t)written, true, NULL, 0);
+}
+
+static int complete_privileged_authorization(struct lws *wsi, struct pss_http *pss, bool passkey) {
+  char code[7] = "";
+  bool verified = pss->buffer && pss->body_len <= 16384 &&
+                  (passkey ? lumen_auth_passkey_step_up(server->auth, pss->client, pss->buffer)
+                           : (form_value(pss->buffer, "code", code, sizeof(code)) &&
+                              lumen_auth_totp_verify(server->auth, code)));
+  if (pss->buffer) {
+    OPENSSL_cleanse(pss->buffer, pss->body_len);
+    pss_buffer_free(pss);
+  }
+  OPENSSL_cleanse(code, sizeof(code));
+  if (!verified) {
+    lumen_auth_audit(server->auth, "privileged_authorization_failed", pss->client,
+                     passkey ? "passkey" : "totp");
+    return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+  }
+  return complete_privileged_grant(wsi, pss, passkey ? "passkey" : "totp");
+}
+
 static int complete_passkey_rename(struct lws *wsi, struct pss_http *pss) {
   char prefix[128], name[64] = "";
   endpoint_path(prefix, sizeof(prefix), "api/passkeys/");
@@ -678,7 +801,7 @@ static int complete_preferences(struct lws *wsi, struct pss_http *pss) {
     free(preferences);
     char *body = malloc(64);
     if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
-    int length = snprintf(body, 64, "{\"version\":%llu}", (unsigned long long)version);
+    int length = snprintf(body, 64, "{\"version\":\"%llu\"}", (unsigned long long)version);
     return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                      body, (size_t)length, true, NULL, 0);
   }
@@ -729,7 +852,9 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       char login_path[128], login_action[128], logout_action[128], passkey_options[128], passkey_login[128],
           passkeys_api[128], passkey_api[128], passkey_register_options[128], passkey_register[128],
           preferences_api[128], audit_api[128], totp_api[128], totp_setup[128], totp_confirm[128], session_api[128],
-          sessions_api[128], health_api[128], healthz[128];
+          sessions_api[128], health_api[128], healthz[128], privileged_methods[128],
+          privileged_authorize[128], privileged_totp[128], privileged_passkey_options[128],
+          privileged_passkey_verify[128];
       endpoint_path(login_path, sizeof(login_path), "login");
       endpoint_path(login_action, sizeof(login_action), "auth/login");
       endpoint_path(logout_action, sizeof(logout_action), "auth/logout");
@@ -748,6 +873,13 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       endpoint_path(sessions_api, sizeof(sessions_api), "api/sessions");
       endpoint_path(health_api, sizeof(health_api), "api/health");
       endpoint_path(healthz, sizeof(healthz), "healthz");
+      endpoint_path(privileged_methods, sizeof(privileged_methods), "api/privileged/methods");
+      endpoint_path(privileged_authorize, sizeof(privileged_authorize), "api/privileged/authorize");
+      endpoint_path(privileged_totp, sizeof(privileged_totp), "api/privileged/authorize/totp");
+      endpoint_path(privileged_passkey_options, sizeof(privileged_passkey_options),
+                    "api/privileged/passkey/options");
+      endpoint_path(privileged_passkey_verify, sizeof(privileged_passkey_verify),
+                    "api/privileged/passkey/verify");
       char *uri = NULL;
       int uri_len = 0;
       int method = lws_http_get_uri_and_method(wsi, &uri, &uri_len);
@@ -759,6 +891,85 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                                 body, strlen(body), true, NULL, 0)
                     : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+      }
+
+      if (!strcmp(pss->path, privileged_methods)) {
+        if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        char *body = malloc(160);
+        if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        const char *idle_seconds = getenv("LUMEN_ROOT_IDLE_SESSION_SECONDS");
+        bool require_verification = true;
+        unsigned int root_max = configured_root_max_sessions(&require_verification);
+        unsigned int root_idle = idle_seconds ? (unsigned int)strtoul(idle_seconds, NULL, 10) : 1800;
+        if (root_idle < 300 || root_idle > 86400) root_idle = 1800;
+        int written = snprintf(body, 160,
+                               "{\"totp\":%s,\"passkey\":%s,\"maxSessions\":%u,\"idleSeconds\":%u,"
+                               "\"requireVerification\":%s}",
+                               lumen_auth_totp_enabled(server->auth) ? "true" : "false",
+                               lumen_auth_has_passkeys(server->auth) ? "true" : "false",
+                               root_max, root_idle, require_verification ? "true" : "false");
+        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                         body, (size_t)written, true, NULL, 0);
+      }
+
+      if (!strcmp(pss->path, privileged_authorize)) {
+        if (method != LWSHUMETH_POST)
+          return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        char user[65] = "";
+        if (!lumen_auth_request_user_session(server->auth, wsi, user, sizeof(user),
+                                             pss->auth_session, sizeof(pss->auth_session)))
+          return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        if (!action_request_valid(wsi, "privileged-authorize"))
+          return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        if (lws_hdr_custom_copy(wsi, pss->terminal_id, sizeof(pss->terminal_id),
+                                "x-lumen-session:", 16) <= 0 ||
+            !privileged_session_id(pss->terminal_id))
+          return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+        bool require_verification = true;
+        configured_root_max_sessions(&require_verification);
+        if (require_verification)
+          return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        char mode[16] = "";
+        lws_hdr_custom_copy(wsi, mode, sizeof(mode), "x-lumen-mode:", 13);
+        pss->privileged_create = !strcmp(mode, "create");
+        lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+        return complete_privileged_grant(wsi, pss, "policy-bypass");
+      }
+
+      if (!strcmp(pss->path, privileged_passkey_options)) {
+        if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        if (!lumen_auth_has_passkeys(server->auth))
+          return send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
+        char client[64] = "";
+        lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
+        char *body = lumen_auth_passkey_options(server->auth, client, false);
+        return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                                body, strlen(body), true, NULL, 0)
+                    : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+      }
+
+      if (!strcmp(pss->path, privileged_totp) || !strcmp(pss->path, privileged_passkey_verify)) {
+        bool passkey = !strcmp(pss->path, privileged_passkey_verify);
+        if (method != LWSHUMETH_POST) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        char user[65] = "";
+        if (!lumen_auth_request_user_session(server->auth, wsi, user, sizeof(user),
+                                             pss->auth_session, sizeof(pss->auth_session)))
+          return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        if (!action_request_valid(wsi, "privileged-authorize"))
+          return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        if (lws_hdr_custom_copy(wsi, pss->terminal_id, sizeof(pss->terminal_id),
+                                "x-lumen-session:", 16) <= 0 ||
+            !privileged_session_id(pss->terminal_id))
+          return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+        char mode[16] = "";
+        lws_hdr_custom_copy(wsi, mode, sizeof(mode), "x-lumen-mode:", 13);
+        pss->privileged_create = !strcmp(mode, "create");
+        lumen_auth_client_key(server->auth, wsi, pss->client, sizeof(pss->client));
+        pss->login_post = true;
+        pss->auth_action = passkey ? 8 : 7;
+        return 0;
       }
       if (!strcmp(pss->path, health_api)) {
         if (method != LWSHUMETH_GET)
@@ -780,7 +991,6 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         long long pty_latency_ms =
             (pty_finished.tv_sec - pty_started.tv_sec) * 1000LL
             + (pty_finished.tv_nsec - pty_started.tv_nsec) / 1000000LL;
-        bool tmux_ok = probe_tmux();
         struct sysinfo system_info = {0};
         struct statvfs disk_info = {0};
         sysinfo(&system_info);
@@ -826,7 +1036,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
                                "\"disk\":{\"usedBytes\":%llu,\"totalBytes\":%llu}}",
                                TTYD_VERSION, (long long)(time(NULL) - http_started_at),
                                web_memory_kb, sessions, pty_latency_ms, connections,
-                               tmux_ok ? "ok" : sessions ? "error" : "idle", sessions,
+                               sessions ? "ok" : "idle", sessions,
                                memory_total - memory_available, memory_total,
                                disk_total - disk_available, disk_total);
         if (written < 0 || written >= 768) {
@@ -897,7 +1107,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
           if (!action_request_valid(wsi, "disconnect"))
             return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
-          int result = disconnect_client(connection_id);
+          int result = disconnect_client(id, connection_id);
           char client[64] = "";
           lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
           if (result == 0) {
@@ -929,6 +1139,8 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
           operation = "--kill-force";
           audit_event = "session_terminated";
         } else if (!strcmp(action, "protect") && action_request_valid(wsi, "protect")) {
+          if (privileged_session_id(session_id))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
           operation = "--protect";
           audit_event = "session_protected";
         } else if (!strcmp(action, "unprotect") && action_request_valid(wsi, "unprotect")) {
@@ -943,6 +1155,8 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
         if (result == 0) {
           lwsl_notice("SESSION action %s %s - %s\n", action, session_id, client);
+          if (privileged_session_id(session_id) && !strncmp(action, "terminate", 9))
+            audit_event = "privileged_session_terminated";
           lumen_auth_audit(server->auth, audit_event, client, session_id);
           return send_empty(wsi, 204, NULL, NULL, NULL);
         }
@@ -1086,7 +1300,9 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
               if (preferences) json_object_put(preferences);
               return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
             }
-            json_object_object_add(preferences, "_version", json_object_new_int64((int64_t)version));
+            char version_text[32];
+            snprintf(version_text, sizeof(version_text), "%llu", (unsigned long long)version);
+            json_object_object_add(preferences, "_version", json_object_new_string(version_text));
             const char *serialized =
                 json_object_to_json_string_ext(preferences, JSON_C_TO_STRING_PLAIN);
             char *body = strdup(serialized);
@@ -1135,6 +1351,8 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
           if (!action_request_valid(wsi, "logout"))
             return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+          if (!lumen_auth_revoke_request_session(server->auth, wsi))
+            return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
           char session_cookie[512];
           if (lumen_auth_clear_session_cookie(server->auth, session_cookie, sizeof(session_cookie)) < 0) return 1;
           char client[64] = "";
@@ -1146,9 +1364,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         if (!strcmp(pss->path, login_path)) {
           if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
           if (check_auth(wsi) == AUTH_OK) {
-            char cookie[512];
-            if (lumen_auth_new_session_cookie(server->auth, cookie, sizeof(cookie)) < 0) return 1;
-            return send_empty(wsi, HTTP_STATUS_SEE_OTHER, endpoints.index, cookie, NULL);
+            return send_empty(wsi, HTTP_STATUS_SEE_OTHER, endpoints.index, NULL, NULL);
           }
           return serve_login(wsi, pss, HTTP_STATUS_OK, "", false, 0);
         }
@@ -1172,19 +1388,11 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       if (strcmp(pss->path, endpoints.token) == 0) {
         const char *credential = server->credential != NULL ? server->credential : "";
         size_t n = (size_t)snprintf(buf, sizeof(buf), "{\"token\":\"%s\"}", credential);
-        char cookie[512] = "";
-        if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION &&
-            lumen_auth_new_session_cookie(server->auth, cookie, sizeof(cookie)) < 0)
-          return 1;
-        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", strdup(buf), n, true, cookie, 0);
+        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", strdup(buf), n, true, NULL, 0);
       }
 
       if (strcmp(pss->path, endpoints.parent) == 0) {
-        char cookie[512] = "";
-        if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION &&
-            lumen_auth_new_session_cookie(server->auth, cookie, sizeof(cookie)) < 0)
-          return 1;
-        return send_empty(wsi, HTTP_STATUS_FOUND, endpoints.index, cookie, NULL);
+        return send_empty(wsi, HTTP_STATUS_FOUND, endpoints.index, NULL, NULL);
       }
 
       if (strcmp(pss->path, endpoints.index) != 0) {
@@ -1192,13 +1400,9 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       }
 
       const char *content_type = "text/html";
-      char cookie[512] = "";
-      if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION &&
-          lumen_auth_new_session_cookie(server->auth, cookie, sizeof(cookie)) < 0)
-        return 1;
       if (server->index != NULL) {
-        char headers[sizeof(security_headers) + sizeof(cookie) + 32];
-        int header_len = snprintf(headers, sizeof(headers), "%s%s", security_headers, cookie);
+        char headers[sizeof(security_headers) + 32];
+        int header_len = snprintf(headers, sizeof(headers), "%s", security_headers);
         int n = lws_serve_http_file(wsi, server->index, content_type, headers, header_len);
         if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi))) return 1;
       } else {
@@ -1215,7 +1419,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
           return 1;
         }
 #endif
-        return send_text(wsi, pss, HTTP_STATUS_OK, content_type, output, output_len, false, cookie, 0);
+        return send_text(wsi, pss, HTTP_STATUS_OK, content_type, output, output_len, false, NULL, 0);
       }
       break;
     }
@@ -1243,6 +1447,8 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       if (pss->auth_action == 4) return complete_totp_confirm(wsi, pss);
       if (pss->auth_action == 5) return complete_passkey_rename(wsi, pss);
       if (pss->auth_action == 6) return complete_preferences(wsi, pss);
+      if (pss->auth_action == 7) return complete_privileged_authorization(wsi, pss, false);
+      if (pss->auth_action == 8) return complete_privileged_authorization(wsi, pss, true);
       return 1;
 
     case LWS_CALLBACK_HTTP_WRITEABLE:

@@ -12,9 +12,10 @@ usage() {
   echo "  --history-bytes <bytes>          Reconnect replay per session (default: 2097152)"
   echo "  --ping-interval <seconds>        WebSocket keepalive (default: 15)"
   echo "  --idle-timeout <seconds>         Automatic reclaim timeout; 0 disables it (default: 0)"
+  echo "  --root-max-sessions <count>      Privileged root sessions (default: 2)"
+  echo "  --root-idle-timeout <seconds>    Root idle reclaim timeout (default: 1800)"
   echo "  --client-ip-header <header>      Trusted proxy client-IP header"
   echo "  --insecure-cookie                Permit session cookies over HTTP"
-  echo "  --allow-sudo                     Install NOPASSWD: ALL for the shell user"
   echo "  --replace-legacy-sessions        Stop and remove the retired tmux supervisor"
 }
 
@@ -43,9 +44,10 @@ max_sessions="16"
 history_bytes="2097152"
 ping_interval="15"
 idle_timeout="0"
+root_max_sessions="2"
+root_idle_timeout="1800"
 client_ip_header=""
 cookie_secure="true"
-allow_sudo="false"
 replace_legacy_sessions="false"
 
 while (($#)); do
@@ -78,16 +80,20 @@ while (($#)); do
       idle_timeout="${2:-}"
       shift 2
       ;;
+    --root-max-sessions)
+      root_max_sessions="${2:-}"
+      shift 2
+      ;;
+    --root-idle-timeout)
+      root_idle_timeout="${2:-}"
+      shift 2
+      ;;
     --client-ip-header)
       client_ip_header="${2:-}"
       shift 2
       ;;
     --insecure-cookie)
       cookie_secure="false"
-      shift
-      ;;
-    --allow-sudo)
-      allow_sudo="true"
       shift
       ;;
     --replace-legacy-sessions)
@@ -139,6 +145,16 @@ if [[ ! "$idle_timeout" =~ ^[0-9]+$ ]] || ((idle_timeout > 31536000)); then
   echo "Invalid idle timeout: $idle_timeout" >&2
   exit 64
 fi
+if [[ ! "$root_max_sessions" =~ ^[0-9]+$ ]] ||
+  ((root_max_sessions < 1 || root_max_sessions > 8)); then
+  echo "Invalid root session count: $root_max_sessions" >&2
+  exit 64
+fi
+if [[ ! "$root_idle_timeout" =~ ^[0-9]+$ ]] ||
+  ((root_idle_timeout < 300 || root_idle_timeout > 86400)); then
+  echo "Invalid root idle timeout: $root_idle_timeout" >&2
+  exit 64
+fi
 if [[ -n "$client_ip_header" && ! "$client_ip_header" =~ ^[A-Za-z0-9-]+$ ]]; then
   echo "Invalid client IP header: $client_ip_header" >&2
   exit 64
@@ -151,7 +167,6 @@ if [[ -z "$passwd_entry" ]]; then
 fi
 
 service_home="$(cut -d: -f6 <<<"$passwd_entry")"
-service_group="$(id -gn "$service_user")"
 service_uid="$(id -u "$service_user")"
 service_gid="$(id -g "$service_user")"
 service_shell="$(cut -d: -f7 <<<"$passwd_entry")"
@@ -163,11 +178,35 @@ project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 install_dir="/opt/lumen-terminal"
 unit_path="/etc/systemd/system/lumen-terminal.service"
 pty_unit_path="/etc/systemd/system/lumen-pty.service"
+root_pty_unit_path="/etc/systemd/system/lumen-root-pty.service"
 legacy_unit_path="/etc/systemd/system/lumen-session.service"
 security_dir="/etc/lumen-terminal"
 security_path="$security_dir/security.conf"
 runtime_path="$security_dir/runtime.env"
-state_root="$service_home/.local/state/lumen-terminal"
+web_user="lumen-web"
+pty_user="lumen-pty"
+socket_group="lumen-terminal"
+root_socket_group="lumen-root-terminal"
+auth_state="/var/lib/lumen-terminal"
+
+getent group "$socket_group" >/dev/null || groupadd --system "$socket_group"
+getent group "$root_socket_group" >/dev/null || groupadd --system "$root_socket_group"
+getent group "$web_user" >/dev/null || groupadd --system "$web_user"
+if ! id "$pty_user" >/dev/null 2>&1; then
+  useradd --system --gid "$socket_group" --home-dir /var/lib/lumen-pty \
+    --shell /usr/sbin/nologin "$pty_user"
+else
+  usermod -g "$socket_group" "$pty_user"
+fi
+if ! id "$web_user" >/dev/null 2>&1; then
+  useradd --system --gid "$socket_group" --groups "$web_user" --home-dir "$auth_state" \
+    --shell /usr/sbin/nologin "$web_user"
+else
+  usermod -g "$socket_group" -a -G "$web_user" "$web_user"
+fi
+usermod -a -G "$root_socket_group" "$web_user"
+web_uid="$(id -u "$web_user")"
+web_group="$web_user"
 
 legacy_sessions="false"
 if systemctl is-active --quiet lumen-session.service; then
@@ -199,7 +238,8 @@ fi
 
 make -C "$project_dir" build
 install -d -o root -g root -m 0755 "$install_dir/bin" "$install_dir/dist" "$install_dir/scripts"
-install -d -o "$service_user" -g "$service_group" -m 0700 "$state_root"
+install -d -o "$web_user" -g "$web_group" -m 0700 "$auth_state"
+install -d -o "$pty_user" -g "$socket_group" -m 0700 /var/lib/lumen-pty
 install -o root -g root -m 0755 "$project_dir/bin/lumen-ttyd" "$install_dir/bin/lumen-ttyd"
 install -o root -g root -m 0755 "$project_dir/bin/lumen-pty" "$install_dir/bin/lumen-pty"
 install -o root -g root -m 0644 "$project_dir/dist/index.html" "$install_dir/dist/index.html"
@@ -216,7 +256,7 @@ if [[ ! -e "$security_path" ]]; then
     --config "$security_path"
     --username "$service_user"
     --host "$allowed_host"
-    --state-dir "$state_root"
+    --state-dir "$auth_state"
   )
   if [[ "$cookie_secure" == "false" ]]; then
     auth_args+=(--insecure-cookie)
@@ -227,9 +267,15 @@ if [[ ! -e "$security_path" ]]; then
   "$project_dir/scripts/lumen-auth" "${auth_args[@]}"
 else
   echo "Keeping existing security policy: $security_path"
+  "$project_dir/scripts/lumen-auth" relocate-state --config "$security_path" --state-dir "$auth_state"
 fi
-chown root:root "$security_path"
-chmod 0600 "$security_path"
+chown -R "$web_user:$web_group" "$auth_state"
+chmod 0700 "$auth_state"
+find "$auth_state" -maxdepth 1 -type f -exec chmod 0600 {} +
+chown root:"$web_group" "$security_path"
+chmod 0640 "$security_path"
+chown root:"$web_group" "$security_dir"
+chmod 0750 "$security_dir"
 
 runtime_temp="$(mktemp "$security_dir/.runtime.XXXXXX")"
 {
@@ -241,36 +287,37 @@ runtime_temp="$(mktemp "$security_dir/.runtime.XXXXXX")"
   printf 'LUMEN_PTY_HISTORY_BYTES=%s\n' "$history_bytes"
   printf 'LUMEN_PING_INTERVAL=%s\n' "$ping_interval"
   printf 'LUMEN_IDLE_SESSION_SECONDS=%s\n' "$idle_timeout"
+  printf 'LUMEN_ROOT_MAX_SESSIONS=%s\n' "$root_max_sessions"
+  printf 'LUMEN_ROOT_IDLE_SESSION_SECONDS=%s\n' "$root_idle_timeout"
 } >"$runtime_temp"
 chown root:root "$runtime_temp"
 chmod 0600 "$runtime_temp"
 mv -f "$runtime_temp" "$runtime_path"
 
-if [[ "$allow_sudo" == "true" ]]; then
-  sudoers_path="/etc/sudoers.d/lumen-terminal-$service_user"
-  sudoers_temp="$(mktemp /etc/sudoers.d/.lumen-terminal.XXXXXX)"
-  printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$service_user" >"$sudoers_temp"
-  chmod 0440 "$sudoers_temp"
-  visudo -cf "$sudoers_temp"
-  mv -f "$sudoers_temp" "$sudoers_path"
-fi
+rm -f "/etc/sudoers.d/lumen-terminal-$service_user"
 
 sed \
-  -e "s|@UID@|$service_uid|g" \
-  -e "s|@GID@|$service_gid|g" \
-  -e "s|@HOME@|$service_home|g" \
-  -e "s|@STATE_ROOT@|$state_root|g" \
+  -e "s|@WEB_USER@|$web_user|g" \
+  -e "s|@SOCKET_GROUP@|$socket_group|g" \
+  -e "s|@ROOT_SOCKET_GROUP@|$root_socket_group|g" \
+  -e "s|@AUTH_STATE@|$auth_state|g" \
   "$project_dir/deploy/lumen-terminal.service.in" >"$unit_path"
 chmod 0644 "$unit_path"
 
 sed \
-  -e "s|@USER@|$service_user|g" \
-  -e "s|@GROUP@|$service_group|g" \
+  -e "s|@SOCKET_GROUP@|$socket_group|g" \
+  -e "s|@UID@|$service_uid|g" \
+  -e "s|@GID@|$service_gid|g" \
   -e "s|@HOME@|$service_home|g" \
-  -e "s|@STATE_ROOT@|$state_root|g" \
   -e "s|@SHELL@|$service_shell|g" \
   "$project_dir/deploy/lumen-pty.service.in" >"$pty_unit_path"
 chmod 0644 "$pty_unit_path"
+
+sed \
+  -e "s|@ROOT_SOCKET_GROUP@|$root_socket_group|g" \
+  -e "s|@WEB_UID@|$web_uid|g" \
+  "$project_dir/deploy/lumen-root-pty.service.in" >"$root_pty_unit_path"
+chmod 0644 "$root_pty_unit_path"
 
 systemctl daemon-reload
 if [[ "$replace_legacy_sessions" == "true" ]]; then
@@ -279,8 +326,10 @@ if [[ "$replace_legacy_sessions" == "true" ]]; then
   systemctl daemon-reload
 fi
 systemctl enable lumen-pty.service
+systemctl enable lumen-root-pty.service
 systemctl enable lumen-terminal.service
 systemctl start lumen-pty.service
+systemctl start lumen-root-pty.service
 systemctl restart lumen-terminal.service
 
 echo

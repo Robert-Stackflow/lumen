@@ -53,6 +53,7 @@ check: build
 	test -x bin/lumen-pty
 	bin/lumen-pty --help >/dev/null
 	bash tests/supervisor.sh
+	bash tests/auth_sessions.sh
 
 clean:
 	rm -rf build bin/lumen-ttyd bin/lumen-pty dist/index.html

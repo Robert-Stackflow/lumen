@@ -4,6 +4,12 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
+#ifdef __linux__
+#include <linux/capability.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#endif
 #include <poll.h>
 #include <pty.h>
 #include <pwd.h>
@@ -130,6 +136,12 @@ struct server_config {
     unsigned int max_sessions;
     unsigned int idle_timeout_seconds;
     const char *tmux;
+    const char *tmux_label;
+    uid_t shell_uid;
+    gid_t shell_gid;
+    uid_t client_uid;
+    bool client_uid_set;
+    bool privileged;
 };
 
 static volatile sig_atomic_t server_stopping;
@@ -191,6 +203,24 @@ static bool valid_session_id(const char *value, size_t length) {
 static const char *default_socket_path(void) {
     const char *configured = getenv("LUMEN_PTY_SOCKET");
     return configured && configured[0] ? configured : "/tmp/lumen-pty.sock";
+}
+
+static bool privileged_session_id(const char *id) {
+    return id && strlen(id) == 6 && !strncmp(id, "root-", 5) &&
+           id[5] >= '1' && id[5] <= '8';
+}
+
+static const char *socket_path_for_session(const char *fallback, const char *session_id) {
+    if (privileged_session_id(session_id)) {
+        const char *configured = getenv("LUMEN_ROOT_PTY_SOCKET");
+        if (configured && configured[0]) return configured;
+        return "/run/lumen-root-terminal/pty.sock";
+    }
+    return fallback;
+}
+
+static bool session_matches_privilege(const struct server_config *config, const char *id) {
+    return config->privileged == privileged_session_id(id);
 }
 
 static int connect_to_server(const char *socket_path) {
@@ -736,6 +766,32 @@ static const char *shell_name(const char *shell) {
     return slash ? slash + 1 : shell;
 }
 
+static bool enter_shell_identity(const struct server_config *config) {
+    if (getuid() == config->shell_uid && getgid() == config->shell_gid) return true;
+    if (setgroups(0, NULL) != 0 ||
+        setgid(config->shell_gid) != 0 ||
+        setuid(config->shell_uid) != 0) {
+        return false;
+    }
+#ifdef __linux__
+    prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0);
+    struct __user_cap_header_struct header = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0,
+    };
+    struct __user_cap_data_struct data[2] = {{0}, {0}};
+    if (syscall(SYS_capset, &header, data) != 0) return false;
+#endif
+    struct passwd *account = getpwuid(config->shell_uid);
+    if (account) {
+        setenv("HOME", account->pw_dir, 1);
+        setenv("USER", account->pw_name, 1);
+        setenv("LOGNAME", account->pw_name, 1);
+        setenv("SHELL", config->shell, 1);
+    }
+    return true;
+}
+
 static int spawn_shell(struct session *session, const struct server_config *config,
                        unsigned short rows, unsigned short columns) {
     struct winsize size = {
@@ -753,6 +809,10 @@ static int spawn_shell(struct session *session, const struct server_config *conf
         signal(SIGINT, SIG_DFL);
         signal(SIGHUP, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
+        if (!enter_shell_identity(config)) {
+            dprintf(STDERR_FILENO, "Could not enter terminal user identity: %s\r\n", strerror(errno));
+            _exit(126);
+        }
         setenv("TERM", "xterm-256color", 1);
         setenv("COLORTERM", "truecolor", 1);
         setenv("TERM_PROGRAM", "Lumen", 1);
@@ -766,11 +826,11 @@ static int spawn_shell(struct session *session, const struct server_config *conf
             char tmux_session[LUMEN_ID_MAX + 16];
             snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", session->id);
             if (session->restored_from_tmux) {
-                execl(config->tmux, config->tmux, "-L", "lumen",
+                execl(config->tmux, config->tmux, "-L", config->tmux_label,
                       "set-option", "-t", tmux_session, "status", "off",
                       ";", "attach-session", "-t", tmux_session, (char *)NULL);
             } else {
-                execl(config->tmux, config->tmux, "-L", "lumen",
+                execl(config->tmux, config->tmux, "-L", config->tmux_label,
                       "new-session", "-d", "-A", "-s", tmux_session,
                       config->shell, "-l",
                       ";", "set-option", "-t", tmux_session, "status", "off",
@@ -905,7 +965,8 @@ static int kill_tmux_session(const struct server_config *config, const char *id)
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        execl(config->tmux, config->tmux, "-L", "lumen", "kill-session",
+        if (!enter_shell_identity(config)) _exit(126);
+        execl(config->tmux, config->tmux, "-L", config->tmux_label, "kill-session",
               "-t", name, (char *)NULL);
         _exit(127);
     }
@@ -919,6 +980,7 @@ static bool tmux_session_exists(const struct server_config *config, const char *
     pid_t pid = fork();
     if (pid < 0) return true;
     if (pid == 0) {
+        if (!enter_shell_identity(config)) _exit(126);
         char tmux_session[LUMEN_ID_MAX + 16];
         snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", id);
         int null_fd = open("/dev/null", O_WRONLY);
@@ -926,7 +988,7 @@ static bool tmux_session_exists(const struct server_config *config, const char *
             dup2(null_fd, STDERR_FILENO);
             close(null_fd);
         }
-        execl(config->tmux, config->tmux, "-L", "lumen", "has-session",
+        execl(config->tmux, config->tmux, "-L", config->tmux_label, "has-session",
               "-t", tmux_session, (char *)NULL);
         _exit(127);
     }
@@ -956,9 +1018,10 @@ static int set_tmux_session_protected(const struct server_config *config,
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+        if (!enter_shell_identity(config)) _exit(126);
         char tmux_session[LUMEN_ID_MAX + 16];
         snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", id);
-        execl(config->tmux, config->tmux, "-L", "lumen", "set-option",
+        execl(config->tmux, config->tmux, "-L", config->tmux_label, "set-option",
               "-t", tmux_session, "@lumen_protected",
               protected ? "1" : "0", (char *)NULL);
         _exit(127);
@@ -1008,7 +1071,7 @@ static bool terminal_handshake_response(const unsigned char *data, size_t length
         if (length - offset < 5 || data[offset] != 0x1b || data[offset + 1] != '[')
             return false;
         size_t index = offset + 2;
-        if (data[index] == '>' || data[index] == '?') index++;
+        if (data[index] == '>' || data[index] == '?' || data[index] == '=') index++;
         size_t digits = index;
         while (index < length && (isdigit(data[index]) || data[index] == ';')) index++;
         if (index == digits || index >= length || data[index] != 'c') return false;
@@ -1179,7 +1242,7 @@ static int create_listen_socket(const char *socket_path) {
     mode_t old_mask = umask(0077);
     int result = bind(fd, (struct sockaddr *) &address, sizeof(address));
     umask(old_mask);
-    if (result != 0 || chmod(socket_path, 0600) != 0 || listen(fd, 32) != 0) {
+    if (result != 0 || chmod(socket_path, 0660) != 0 || listen(fd, 32) != 0) {
         int saved_errno = errno;
         close(fd);
         if (result == 0) {
@@ -1191,25 +1254,26 @@ static int create_listen_socket(const char *socket_path) {
     return fd;
 }
 
-static bool client_has_expected_uid(int fd) {
+static bool client_has_expected_identity(int fd, const struct server_config *config) {
 #ifdef SO_PEERCRED
     struct ucred credentials;
     socklen_t length = sizeof(credentials);
     return getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &credentials, &length) == 0 &&
-           credentials.uid == getuid();
+           (credentials.uid == getuid() || credentials.gid == getgid() ||
+            (config->client_uid_set && credentials.uid == config->client_uid));
 #else
     (void) fd;
     return true;
 #endif
 }
 
-static struct client *accept_client(int listen_fd) {
+static struct client *accept_client(int listen_fd, const struct server_config *config) {
     static uint64_t next_client_id = 1;
     int fd = accept4(listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (fd < 0) {
         return NULL;
     }
-    if (!client_has_expected_uid(fd)) {
+    if (!client_has_expected_identity(fd, config)) {
         close(fd);
         errno = EACCES;
         return NULL;
@@ -1264,6 +1328,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         char id[LUMEN_ID_MAX + 1] = {0};
         memcpy(id, payload, id_length);
+        if (!session_matches_privilege(config, id)) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
         if (separator) {
             const unsigned char *metadata = separator + 1;
             size_t metadata_length = header.length - id_length - 1;
@@ -1384,6 +1452,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         char id[LUMEN_ID_MAX + 1] = {0};
         memcpy(id, payload, header.length);
+        if (!session_matches_privilege(config, id)) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
         struct session *session = find_session(*sessions, id);
         if (!session) {
             queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
@@ -1413,6 +1485,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         char id[LUMEN_ID_MAX + 1] = {0};
         memcpy(id, payload, header.length);
+        if (!session_matches_privilege(config, id)) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
         struct session *session = find_session(*sessions, id);
         if (!session) {
             queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
@@ -1471,7 +1547,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            "\"rows\":%u,\"columns\":%u,\"createdAt\":%lld,"
                            "\"foregroundPid\":%ld,\"foregroundCommand\":\"%s\","
                            "\"workingDirectory\":\"%s\",\"memoryKb\":%lu,\"cpuPercent\":%.1f,"
-                           "\"lastActivityAt\":%lld,\"protected\":%s,"
+                           "\"lastActivityAt\":%lld,\"protected\":%s,\"privileged\":%s,"
                            "\"connections\":[",
                            used > 1 ? "," : "", session->id, (long) session->pid,
                            attached_client_count(clients, session),
@@ -1481,7 +1557,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            (long)foreground_pid, foreground_command, working_directory,
                            memory_kb, session->cpu_percent,
                            (long long)session->last_activity_at,
-                           session->protected ? "true" : "false")
+                           session->protected ? "true" : "false",
+                           config->privileged ? "true" : "false")
                 : snprintf(list + used, sizeof(list) - used,
                            "%-32s pid=%-7ld clients=%u history=%zu%s\n",
                            session->id, (long) session->pid,
@@ -1547,14 +1624,14 @@ static void terminate_expired_sessions(struct session *sessions) {
 }
 
 static void terminate_idle_sessions(struct session *sessions, const struct client *clients,
-                                    unsigned int idle_timeout_seconds) {
-    if (!idle_timeout_seconds) {
+                                    const struct server_config *config) {
+    if (!config->idle_timeout_seconds) {
         return;
     }
     int64_t now = monotonic_milliseconds();
-    int64_t timeout_ms = (int64_t) idle_timeout_seconds * 1000;
+    int64_t timeout_ms = (int64_t) config->idle_timeout_seconds * 1000;
     for (struct session *session = sessions; session; session = session->next) {
-        if (!session->protected && !session->terminate_deadline_ms &&
+        if ((!session->protected || config->privileged) && !session->terminate_deadline_ms &&
             attached_client_count(clients, session) == 0 &&
             now - session->last_activity_ms >= timeout_ms) {
             fprintf(stderr, "lumen-pty: reclaiming idle session %s\n", session->id);
@@ -1576,10 +1653,11 @@ static void discover_tmux_sessions(struct session **sessions,
         return;
     }
     if (pid == 0) {
+        if (!enter_shell_identity(config)) _exit(126);
         close(fds[0]);
         dup2(fds[1], STDOUT_FILENO);
         close(fds[1]);
-        execl(config->tmux, config->tmux, "-L", "lumen", "list-sessions",
+        execl(config->tmux, config->tmux, "-L", config->tmux_label, "list-sessions",
               "-F", "#{session_name}\t#{session_created}\t#{@lumen_protected}", (char *)NULL);
         _exit(127);
     }
@@ -1595,7 +1673,8 @@ static void discover_tmux_sessions(struct session **sessions,
             continue;
         const char *id = name + 6;
         size_t id_length = strlen(id);
-        if (!valid_session_id(id, id_length) || session_count(*sessions) >= config->max_sessions)
+        if (!valid_session_id(id, id_length) || !session_matches_privilege(config, id) ||
+            session_count(*sessions) >= config->max_sessions)
             continue;
         struct session *session = calloc(1, sizeof(*session));
         if (!session) break;
@@ -1686,7 +1765,7 @@ static int serve(const struct server_config *config) {
 
         if (descriptors[0].revents & POLLIN) {
             while (client_total < LUMEN_CLIENTS_MAX) {
-                struct client *client = accept_client(listen_fd);
+                struct client *client = accept_client(listen_fd, config);
                 if (!client) {
                     if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EACCES) {
                         fprintf(stderr, "lumen-pty: accept failed: %s\n", strerror(errno));
@@ -1768,7 +1847,7 @@ static int serve(const struct server_config *config) {
         }
 
         terminate_expired_sessions(sessions);
-        terminate_idle_sessions(sessions, clients, config->idle_timeout_seconds);
+        terminate_idle_sessions(sessions, clients, config);
         if (child_changed) {
             reap_children(&sessions, clients, queue_limit);
         }
@@ -1830,7 +1909,8 @@ static void usage(FILE *stream) {
             "  lumen-pty --list-json\n"
             "  lumen-pty --serve [--socket PATH] [--shell PATH] [--cwd PATH]\\\n"
             "             [--history-bytes N] [--max-sessions N] [--idle-timeout N]\\\n"
-            "             [--tmux PATH]\n");
+            "             [--tmux PATH] [--tmux-label NAME] [--privileged]\\\n"
+            "             [--shell-uid UID] [--shell-gid GID] [--client-uid UID]\n");
 }
 
 int main(int argc, char **argv) {
@@ -1844,6 +1924,9 @@ int main(int argc, char **argv) {
             .working_directory = home,
             .history_bytes = LUMEN_HISTORY_DEFAULT,
             .max_sessions = LUMEN_SESSIONS_DEFAULT,
+            .tmux_label = "lumen",
+            .shell_uid = getuid(),
+            .shell_gid = getgid(),
         };
         if (!config.shell || !config.shell[0]) {
             config.shell = account && account->pw_shell[0] ? account->pw_shell : "/bin/sh";
@@ -1869,19 +1952,41 @@ int main(int argc, char **argv) {
                     argv[++index], 0, 31536000, "idle session timeout");
             } else if (strcmp(argv[index], "--tmux") == 0 && index + 1 < argc) {
                 config.tmux = argv[++index];
+            } else if (strcmp(argv[index], "--tmux-label") == 0 && index + 1 < argc) {
+                config.tmux_label = argv[++index];
+            } else if (strcmp(argv[index], "--privileged") == 0) {
+                config.privileged = true;
+            } else if (strcmp(argv[index], "--shell-uid") == 0 && index + 1 < argc) {
+                config.shell_uid = (uid_t) parse_unsigned(
+                    argv[++index], 0, UINT32_MAX, "shell uid");
+            } else if (strcmp(argv[index], "--shell-gid") == 0 && index + 1 < argc) {
+                config.shell_gid = (gid_t) parse_unsigned(
+                    argv[++index], 0, UINT32_MAX, "shell gid");
+            } else if (strcmp(argv[index], "--client-uid") == 0 && index + 1 < argc) {
+                config.client_uid = (uid_t) parse_unsigned(
+                    argv[++index], 0, UINT32_MAX, "client uid");
+                config.client_uid_set = true;
             } else {
                 usage(stderr);
                 return STATUS_INVALID;
             }
         }
-        if (!config.socket_path[0] || access(config.shell, X_OK) != 0 ||
+        struct stat working_directory;
+        if (!valid_session_id(config.tmux_label, strlen(config.tmux_label)) ||
+            !config.socket_path[0] || access(config.shell, X_OK) != 0 ||
             (config.tmux && access(config.tmux, X_OK) != 0) ||
-            access(config.working_directory, X_OK) != 0) {
+            stat(config.working_directory, &working_directory) != 0 ||
+            !S_ISDIR(working_directory.st_mode)) {
             fprintf(stderr, "Invalid supervisor socket, shell, or working directory.\n");
             return STATUS_INVALID;
         }
         return serve(&config);
     }
+
+    if (argc == 3 && argv[2][0] && strcmp(argv[1], "--disconnect") != 0)
+        socket_path = socket_path_for_session(socket_path, argv[2]);
+    if (argc >= 2 && argv[1][0] != '-')
+        socket_path = socket_path_for_session(socket_path, argv[1]);
 
     if (argc == 3 && strcmp(argv[1], "--kill") == 0) {
         return control_client(socket_path, MSG_KILL, argv[2]);

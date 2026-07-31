@@ -113,16 +113,21 @@ static bool passkey_record(FILE *file, char *id_hex, size_t id_size, char *key_h
   return false;
 }
 
-bool lumen_auth_has_passkeys(struct lumen_auth *auth) {
-  if (!auth || !auth->passkey_store[0]) return false;
+static size_t passkey_count(struct lumen_auth *auth) {
+  if (!auth || !auth->passkey_store[0]) return 0;
   FILE *file = fopen(auth->passkey_store, "r");
-  if (!file) return false;
+  if (!file) return 0;
   char id[1024], key[2048];
   int algorithm = 0;
   int64_t created_at = 0;
-  bool found = passkey_record(file, id, sizeof(id), key, sizeof(key), &algorithm, &created_at);
+  size_t count = 0;
+  while (passkey_record(file, id, sizeof(id), key, sizeof(key), &algorithm, &created_at)) count++;
   fclose(file);
-  return found;
+  return count;
+}
+
+bool lumen_auth_has_passkeys(struct lumen_auth *auth) {
+  return passkey_count(auth) > 0;
 }
 
 char *lumen_auth_passkey_options(struct lumen_auth *auth, const char *client, bool registration) {
@@ -312,7 +317,7 @@ bool lumen_auth_passkey_register(struct lumen_auth *auth, const char *client, co
   return saved;
 }
 
-bool lumen_auth_passkey_login(struct lumen_auth *auth, const char *client, const char *json) {
+static bool passkey_verify(struct lumen_auth *auth, const char *client, const char *json, bool step_up) {
   struct lumen_webauthn_challenge *entry = challenge_entry(auth, client, false);
   if (!entry->client[0] || entry->expires < (int64_t)time(NULL)) return false;
   json_object *root = json_tokener_parse(json);
@@ -356,8 +361,19 @@ bool lumen_auth_passkey_login(struct lumen_auth *auth, const char *client, const
   }
   fclose(file);
   memset(entry, 0, sizeof(*entry));
-  lumen_auth_audit(auth, verified ? "passkey_login_success" : "passkey_login_failed", client, "webauthn");
+  lumen_auth_audit(auth,
+                   step_up ? (verified ? "passkey_step_up_success" : "passkey_step_up_failed")
+                           : (verified ? "passkey_login_success" : "passkey_login_failed"),
+                   client, "webauthn");
   return verified;
+}
+
+bool lumen_auth_passkey_login(struct lumen_auth *auth, const char *client, const char *json) {
+  return passkey_verify(auth, client, json, false);
+}
+
+bool lumen_auth_passkey_step_up(struct lumen_auth *auth, const char *client, const char *json) {
+  return passkey_verify(auth, client, json, true);
 }
 
 char *lumen_auth_passkey_list(struct lumen_auth *auth) {
@@ -406,6 +422,7 @@ char *lumen_auth_passkey_list(struct lumen_auth *auth) {
 
 bool lumen_auth_passkey_delete(struct lumen_auth *auth, const char *client, const char *encoded_id) {
   if (!auth || !auth->passkey_store[0]) return false;
+  if (auth->require_mfa && !auth->totp_secret_len && passkey_count(auth) <= 1) return false;
   unsigned char id[512];
   size_t id_len = 0;
   if (!base64url_decode(encoded_id, id, sizeof(id), &id_len)) return false;

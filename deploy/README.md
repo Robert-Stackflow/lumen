@@ -4,8 +4,9 @@ Lumen's terminal, authentication, and network exposure are separate choices.
 OpenResty is used on the current host only as the TLS/WebSocket proxy; it is
 not a runtime dependency of Lumen.
 
-The systemd deployment also separates the short-lived web transport from
-`lumen-pty.service`, which owns the real PTYs and shell processes. The
+The systemd deployment separates the short-lived web transport, the
+`lumen-pty` supervisor identity, the unprivileged shell identity, and an
+explicitly gated root supervisor. The
 installer starts but never restarts the PTY supervisor during ordinary
 updates, so restarting Lumen's HTTP/WebSocket layer does not terminate work.
 
@@ -15,8 +16,7 @@ updates, so restarting Lumen's HTTP/WebSocket layer does not terminate work.
 sudo ./scripts/install.sh ubuntu terminal.example.com \
   --listen lo \
   --port 7681 \
-  --client-ip-header X-Real-IP \
-  --allow-sudo
+  --client-ip-header X-Real-IP
 ```
 
 Forward HTTPS and WebSocket traffic to `127.0.0.1:7681`. Preserve `Host` and
@@ -31,8 +31,7 @@ own port to it:
 ```bash
 sudo ./scripts/install.sh ubuntu terminal.internal.example \
   --listen 0.0.0.0 \
-  --port 9080 \
-  --allow-sudo
+  --port 9080
 ```
 
 If the browser-facing endpoint is HTTPS, keep the default secure cookie even
@@ -87,9 +86,17 @@ service alive so active work is not destroyed. Verify the new web terminal,
 then run the installer once from SSH/console with
 `--replace-legacy-sessions` to remove that retired service.
 
-## Root policy
+## Privilege policy
 
-The base service permits setuid escalation. `--allow-sudo` also installs an
-explicit `NOPASSWD: ALL` rule for the selected shell user. If a deployment
-must prohibit root, install `no-root-hardening.conf` as a systemd drop-in and
-reload/restart systemd.
+The terminal service sets `NoNewPrivileges=true`, has an empty capability
+bounding set, and never installs sudo rules. Ordinary `+` tabs therefore
+remain the configured non-root account.
+
+The tab-strip menu has a separate “new root session” action. It requires a
+fresh TOTP or WebAuthn verification before every create or attach, uses
+`/run/lumen-root-terminal/pty.sock` and tmux label `lumen-root`, and is capped
+by `LUMEN_ROOT_MAX_SESSIONS` plus `LUMEN_ROOT_IDLE_SESSION_SECONDS`. The
+installer defaults those values to 2 sessions and 1800 seconds. Root socket
+access uses its own Unix group and the daemon additionally verifies the web
+process UID. Root create, attach, disconnect, and termination actions are
+written to the security audit log.

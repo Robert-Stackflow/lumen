@@ -47,6 +47,9 @@ struct pss_http {
   char origin[512];
   char host[256];
   char client[64];
+  char auth_session[LUMEN_SESSION_ID_LEN + 1];
+  char terminal_id[33];
+  bool privileged_create;
 };
 
 struct pss_tty {
@@ -56,8 +59,11 @@ struct pss_tty {
   char user[30];
   char address[50];
   char path[128];
+  char session_id[LUMEN_SESSION_ID_LEN + 1];
   char **args;
   int argc;
+  bool privileged;
+  bool privileged_create;
 
   struct lws *wsi;
   char *buffer;

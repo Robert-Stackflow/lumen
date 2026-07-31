@@ -70,6 +70,11 @@ static bool check_host_origin(struct lws *wsi) {
   return len > 0 && strcasecmp(buf, host_buf) == 0;
 }
 
+static bool privileged_session_id(const char *id) {
+  return id && strlen(id) == 6 && !strncmp(id, "root-", 5) &&
+         id[5] >= '1' && id[5] <= '8';
+}
+
 static pty_ctx_t *pty_ctx_init(struct pss_tty *pss) {
   pty_ctx_t *ctx = xmalloc(sizeof(pty_ctx_t));
   ctx->pss = pss;
@@ -132,7 +137,7 @@ static char **build_args(struct pss_tty *pss) {
 }
 
 static char **build_env(struct pss_tty *pss) {
-  int i = 0, n = 3;
+  int i = 0, n = 5;
   char **envp = xmalloc(n * sizeof(char *));
 
   // TERM
@@ -143,6 +148,18 @@ static char **build_env(struct pss_tty *pss) {
   // Pass the authenticated / trusted-proxy client address to lumen-pty.
   envp[i] = xmalloc(strlen(pss->address) + 17);
   sprintf(envp[i], "LUMEN_CLIENT_IP=%s", pss->address);
+  i++;
+
+  const char *socket_path = getenv("LUMEN_PTY_SOCKET");
+  if (!socket_path || !socket_path[0]) socket_path = "/run/lumen-terminal/pty.sock";
+  envp[i] = xmalloc(strlen(socket_path) + 18);
+  sprintf(envp[i], "LUMEN_PTY_SOCKET=%s", socket_path);
+  i++;
+
+  const char *root_socket = getenv("LUMEN_ROOT_PTY_SOCKET");
+  if (!root_socket || !root_socket[0]) root_socket = "/run/lumen-root-terminal/pty.sock";
+  envp[i] = xmalloc(strlen(root_socket) + 23);
+  sprintf(envp[i], "LUMEN_ROOT_PTY_SOCKET=%s", root_socket);
   i++;
 
   // TTYD_USER
@@ -212,7 +229,8 @@ static void wsi_pong(struct lws *wsi, struct pss_tty *pss) {
 
 static bool check_auth(struct lws *wsi, struct pss_tty *pss) {
   if (server->auth != NULL) {
-    return lumen_auth_request_user(server->auth, wsi, pss->user, sizeof(pss->user));
+    return lumen_auth_request_user_session(server->auth, wsi, pss->user, sizeof(pss->user), pss->session_id,
+                                           sizeof(pss->session_id));
   }
 
   if (server->auth_header != NULL) {
@@ -286,9 +304,40 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
         }
       }
 
+      if (pss->argc > 0 && privileged_session_id(pss->args[0])) {
+        bool create = false;
+        if (pss->argc != 5 ||
+            !lumen_auth_consume_privileged_grant(server->auth, pss->session_id,
+                                                 pss->args[0], pss->args[4], &create)) {
+          lumen_auth_audit(server->auth, "privileged_session_rejected", pss->address,
+                           pss->argc > 0 ? pss->args[0] : "missing-session");
+          lws_close_reason(wsi, LWS_CLOSE_STATUS_POLICY_VIOLATION, NULL, 0);
+          return 1;
+        }
+        pss->privileged = true;
+        pss->privileged_create = create;
+        free(pss->args[4]);
+        pss->argc = 4;
+        if (create)
+          lumen_auth_audit(server->auth, "privileged_session_created", pss->address, pss->args[0]);
+        lumen_auth_audit(server->auth, "privileged_session_connected", pss->address, pss->args[0]);
+      }
+
       server->client_count++;
       lumen_auth_ws_connected(server->auth, pss->address);
+      if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION)
+        lws_set_timer_usecs(wsi, 30 * LWS_USEC_PER_SEC);
       lwsl_notice("WS   %s - %s, clients: %d\n", pss->path, pss->address, server->client_count);
+      break;
+
+    case LWS_CALLBACK_TIMER:
+      if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION &&
+          !lumen_auth_session_active(server->auth, pss->session_id, true)) {
+        lumen_auth_audit(server->auth, "ws_revoked", pss->address, "session-expired");
+        lws_close_reason(wsi, LWS_CLOSE_STATUS_POLICY_VIOLATION, NULL, 0);
+        return -1;
+      }
+      lws_set_timer_usecs(wsi, 30 * LWS_USEC_PER_SEC);
       break;
 
     case LWS_CALLBACK_SERVER_WRITEABLE:
@@ -328,6 +377,11 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
       break;
 
     case LWS_CALLBACK_RECEIVE:
+      if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION &&
+          !lumen_auth_session_active(server->auth, pss->session_id, true)) {
+        lws_close_reason(wsi, LWS_CLOSE_STATUS_POLICY_VIOLATION, NULL, 0);
+        return -1;
+      }
       if (pss->buffer == NULL) {
         pss->buffer = xmalloc(len);
         pss->len = len;
@@ -419,6 +473,8 @@ int callback_tty(struct lws *wsi, enum lws_callback_reasons reason, void *user, 
 
       server->client_count--;
       lumen_auth_ws_disconnected(server->auth, pss->address);
+      if (pss->privileged && pss->argc > 0)
+        lumen_auth_audit(server->auth, "privileged_session_disconnected", pss->address, pss->args[0]);
       lwsl_notice("WS closed from %s, clients: %d\n", pss->address, server->client_count);
       if (pss->buffer != NULL) free(pss->buffer);
       if (pss->pty_buf != NULL) pty_buf_free(pss->pty_buf);

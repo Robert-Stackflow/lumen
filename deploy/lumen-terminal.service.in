@@ -1,34 +1,52 @@
 [Unit]
 Description=Lumen web terminal
 Documentation=file:///opt/lumen-terminal/README.md
-Requires=lumen-pty.service
-After=network.target lumen-pty.service
+Requires=lumen-pty.service lumen-root-pty.service
+After=network.target lumen-pty.service lumen-root-pty.service
 
 [Service]
 Type=simple
-User=root
-Group=root
-WorkingDirectory=@HOME@
-Environment=HOME=@HOME@
+User=@WEB_USER@
+Group=@SOCKET_GROUP@
+SupplementaryGroups=@ROOT_SOCKET_GROUP@
+WorkingDirectory=@AUTH_STATE@
+Environment=HOME=@AUTH_STATE@
 Environment=LANG=C.UTF-8
 Environment=TERM=xterm-256color
-Environment=LUMEN_PTY_SOCKET=@STATE_ROOT@/pty.sock
+Environment=LUMEN_PTY_SOCKET=/run/lumen-terminal/pty.sock
+Environment=LUMEN_ROOT_PTY_SOCKET=/run/lumen-root-terminal/pty.sock
 Environment=LUMEN_LOGIN_TEMPLATE=/opt/lumen-terminal/dist/login.html
 EnvironmentFile=/etc/lumen-terminal/runtime.env
-ExecStart=/opt/lumen-terminal/bin/lumen-ttyd --uid @UID@ --gid @GID@ --port ${LUMEN_PORT} --interface ${LUMEN_INTERFACE} --writable --url-arg --check-origin --security-config ${LUMEN_SECURITY_CONFIG} --max-clients ${LUMEN_MAX_CLIENTS} --ping-interval ${LUMEN_PING_INTERVAL} --index /opt/lumen-terminal/dist/index.html /opt/lumen-terminal/bin/lumen-pty
+ExecStart=/opt/lumen-terminal/bin/lumen-ttyd --port ${LUMEN_PORT} --interface ${LUMEN_INTERFACE} --writable --url-arg --check-origin --security-config ${LUMEN_SECURITY_CONFIG} --max-clients ${LUMEN_MAX_CLIENTS} --ping-interval ${LUMEN_PING_INTERVAL} --index /opt/lumen-terminal/dist/index.html /opt/lumen-terminal/bin/lumen-pty
 Restart=on-failure
 RestartSec=2
 KillMode=mixed
 TimeoutStopSec=10
 
-# This base profile deliberately permits sudo/setuid escalation. Apply
-# deploy/no-root-hardening.conf as a systemd drop-in to disable it.
 UMask=0077
 LimitNOFILE=4096
 LimitCORE=0
 TasksMax=256
 MemoryHigh=512M
 MemoryMax=768M
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=@AUTH_STATE@
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictRealtime=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

@@ -33,6 +33,25 @@ struct lumen_webauthn_challenge {
   bool registration;
 };
 
+#define LUMEN_SESSION_ID_LEN 64
+#define LUMEN_MAX_SESSIONS 128
+
+struct lumen_session {
+  char id[LUMEN_SESSION_ID_LEN + 1];
+  int64_t issued;
+  int64_t expires;
+  int64_t last_seen;
+};
+
+#define LUMEN_PRIVILEGED_GRANTS 32
+struct lumen_privileged_grant {
+  char auth_session[LUMEN_SESSION_ID_LEN + 1];
+  char terminal_id[33];
+  char token[65];
+  int64_t expires;
+  bool create;
+};
+
 struct lumen_auth {
   enum lumen_auth_mode mode;
   char username[65];
@@ -43,6 +62,9 @@ struct lumen_auth {
   unsigned char session_secret[32];
   uint32_t session_generation;
   int64_t session_ttl;
+  int64_t session_idle_timeout;
+  char session_store[512];
+  bool require_mfa;
   bool cookie_secure;
   char allowed_host[256];
   char proxy_header[128];
@@ -68,6 +90,8 @@ struct lumen_auth {
   struct lumen_login_rate rates[64];
   struct lumen_ws_rate ws_rates[64];
   struct lumen_webauthn_challenge challenges[32];
+  struct lumen_session sessions[LUMEN_MAX_SESSIONS];
+  struct lumen_privileged_grant privileged_grants[LUMEN_PRIVILEGED_GRANTS];
 };
 
 enum lumen_login_result {
@@ -75,6 +99,7 @@ enum lumen_login_result {
   LUMEN_LOGIN_INVALID,
   LUMEN_LOGIN_TOTP_INVALID,
   LUMEN_LOGIN_LOCKED,
+  LUMEN_LOGIN_MFA_REQUIRED,
   LUMEN_LOGIN_ERROR,
 };
 
@@ -83,6 +108,10 @@ void lumen_auth_free(struct lumen_auth *auth);
 
 bool lumen_auth_host_allowed(struct lumen_auth *auth, struct lws *wsi);
 bool lumen_auth_request_user(struct lumen_auth *auth, struct lws *wsi, char *user, size_t user_len);
+bool lumen_auth_request_user_session(struct lumen_auth *auth, struct lws *wsi, char *user, size_t user_len,
+                                     char *session_id, size_t session_id_len);
+bool lumen_auth_session_active(struct lumen_auth *auth, const char *session_id, bool touch);
+bool lumen_auth_revoke_request_session(struct lumen_auth *auth, struct lws *wsi);
 bool lumen_auth_origin_valid(struct lumen_auth *auth, const char *origin, const char *host);
 void lumen_auth_client_key(struct lumen_auth *auth, struct lws *wsi, char *client, size_t client_len);
 
@@ -96,6 +125,7 @@ void lumen_auth_ws_disconnected(struct lumen_auth *auth, const char *client);
 char *lumen_auth_passkey_options(struct lumen_auth *auth, const char *client, bool registration);
 bool lumen_auth_passkey_register(struct lumen_auth *auth, const char *client, const char *json);
 bool lumen_auth_passkey_login(struct lumen_auth *auth, const char *client, const char *json);
+bool lumen_auth_passkey_step_up(struct lumen_auth *auth, const char *client, const char *json);
 bool lumen_auth_has_passkeys(struct lumen_auth *auth);
 char *lumen_auth_passkey_list(struct lumen_auth *auth);
 bool lumen_auth_passkey_delete(struct lumen_auth *auth, const char *client, const char *encoded_id);
@@ -105,8 +135,15 @@ char *lumen_auth_totp_begin(struct lumen_auth *auth, const char *client);
 bool lumen_auth_totp_confirm(struct lumen_auth *auth, const char *client, const char *code);
 bool lumen_auth_totp_remove(struct lumen_auth *auth, const char *client, const char *code);
 bool lumen_auth_totp_enabled(struct lumen_auth *auth);
+bool lumen_auth_totp_verify(struct lumen_auth *auth, const char *code);
+bool lumen_auth_issue_privileged_grant(struct lumen_auth *auth, const char *auth_session,
+                                       const char *terminal_id, bool create, char token[65]);
+bool lumen_auth_consume_privileged_grant(struct lumen_auth *auth, const char *auth_session,
+                                         const char *terminal_id, const char *token, bool *create);
 char *lumen_auth_preferences_get(struct lumen_auth *auth, uint64_t *version);
 bool lumen_auth_preferences_set(struct lumen_auth *auth, const char *json, bool *conflict);
+void lumen_auth_privileged_preferences(struct lumen_auth *auth, unsigned int default_max_sessions,
+                                        unsigned int *max_sessions, bool *require_verification);
 
 int lumen_auth_new_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);
 int lumen_auth_clear_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);
