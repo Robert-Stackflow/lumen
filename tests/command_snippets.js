@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const fs = require('node:fs');
+const context = { globalThis: {}, crypto: { randomUUID: () => 'generated' } };
+vm.runInNewContext(fs.readFileSync('web/command-snippets.js', 'utf8'), context);
+const snippets = context.globalThis.LumenCommandSnippets;
+assert.equal(snippets.isDangerous('rm -rf /tmp/example'), true);
+assert.equal(snippets.isDangerous('printf hello'), false);
+assert.equal(snippets.upsert([], { id: 'one', name: 'Test', command: 'pwd' }).length, 1);
+console.log('command snippet model checks passed');

@@ -129,6 +129,8 @@
           <button type="button" data-settings-tab="sessions" aria-selected="false">会话</button>
           <button type="button" data-settings-tab="snippets" aria-selected="false">命令片段</button>
           <button type="button" data-settings-tab="security" aria-selected="false">安全</button>
+          <button type="button" data-settings-tab="audit" aria-selected="false">审计日志</button>
+          <button type="button" data-settings-tab="diagnostics" aria-selected="false">错误诊断</button>
         </nav>
 
         <div class="settings-content">
@@ -148,6 +150,11 @@
               <label class="settings-row settings-toggle-row">
                 <span><strong>继承当前目录</strong><small>新标签优先使用当前终端通过 OSC 7 报告的目录</small></span>
                 <input id="setting-inherit-working-directory" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+              </label>
+              <label class="settings-row settings-toggle-row">
+                <span><strong>保存终端画面</strong><small>在此浏览器保存终端历史以便刷新后恢复，可能包含敏感输出</small></span>
+                <input id="setting-persist-terminal-state" type="checkbox">
                 <i class="switch" aria-hidden="true"></i>
               </label>
             </div>
@@ -242,7 +249,10 @@
           <section class="settings-panel" data-settings-panel="sessions" hidden>
             <header class="settings-panel-heading">
               <span><h3>会话</h3><p>查看后台终端及连接详情，并可单独断开连接</p></span>
-              <button id="refresh-session-manager" type="button">刷新</button>
+              <span class="settings-heading-actions">
+                <button id="cleanup-idle-sessions" type="button">清理空闲</button>
+                <button id="refresh-session-manager" type="button">刷新</button>
+              </span>
             </header>
             <div class="session-manager-toolbar">
               <input id="session-manager-search" type="search" placeholder="搜索名称、备注或会话 ID">
@@ -258,9 +268,53 @@
                   <button type="button" role="option" data-value="connections">按连接数</button>
                 </div>
               </div>
+              <div id="idle-cleanup-threshold" class="custom-select" data-value="1800">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>空闲 30 分钟</span>
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="1800">空闲 30 分钟</button>
+                  <button type="button" role="option" data-value="3600">空闲 1 小时</button>
+                  <button type="button" role="option" data-value="21600">空闲 6 小时</button>
+                  <button type="button" role="option" data-value="86400">空闲 24 小时</button>
+                </div>
+              </div>
             </div>
+            <div id="idle-cleanup-preview" class="idle-cleanup-preview" aria-live="polite"></div>
             <div id="session-manager-list" class="session-manager-list">
               <div class="session-manager-loading">正在读取会话…</div>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="diagnostics" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>前端错误诊断</h3><p>集中查看 WebSocket、IndexedDB、偏好同步和脚本异常</p></span>
+              <span class="settings-heading-actions">
+                <button id="copy-diagnostics" type="button">复制</button>
+                <button id="export-diagnostics" type="button">导出 JSON</button>
+                <button id="clear-diagnostics" type="button">清空</button>
+              </span>
+            </header>
+            <div class="diagnostics-toolbar">
+              <div id="diagnostics-source-filter" class="custom-select" data-value="all">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>全部异常</span>
+                  <svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="all">全部异常</button>
+                  <button type="button" role="option" data-value="websocket">WebSocket</button>
+                  <button type="button" role="option" data-value="indexeddb">IndexedDB</button>
+                  <button type="button" role="option" data-value="preferences">偏好同步</button>
+                  <button type="button" role="option" data-value="javascript">JavaScript</button>
+                  <button type="button" role="option" data-value="other">其他异常</button>
+                </div>
+              </div>
+              <span id="diagnostics-count">0 条异常</span>
+            </div>
+            <div id="diagnostics-list" class="diagnostics-list">
+              <div class="session-manager-loading">暂无异常</div>
             </div>
           </section>
 
@@ -312,6 +366,53 @@
             </div>
             <div class="settings-tools security-tools">
               <button id="logout-session" class="settings-logout" type="button">退出当前设备</button>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="audit" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>安全审计日志</h3><p>最近 200 条登录、连接和敏感操作记录</p></span>
+              <button id="refresh-audit-log" type="button">刷新</button>
+            </header>
+            <div class="audit-toolbar">
+              <input id="audit-log-search" type="search" placeholder="筛选事件、IP 或详情">
+              <div id="audit-event-filter" class="custom-select" data-value="all">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>全部事件</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="all">全部事件</button>
+                  <button type="button" role="option" data-value="auth">登录与认证</button>
+                  <button type="button" role="option" data-value="terminal">终端连接</button>
+                  <button type="button" role="option" data-value="danger">敏感操作</button>
+                  <button type="button" role="option" data-value="settings">设置修改</button>
+                </div>
+              </div>
+              <div id="audit-time-filter" class="custom-select" data-value="all">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>全部时间</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="all">全部时间</button>
+                  <button type="button" role="option" data-value="hour">最近一小时</button>
+                  <button type="button" role="option" data-value="day">最近 24 小时</button>
+                  <button type="button" role="option" data-value="week">最近 7 天</button>
+                </div>
+              </div>
+            </div>
+            <div class="audit-actions">
+              <span id="audit-log-count">0 条记录</span>
+              <label class="audit-auto-refresh">
+                <input id="audit-auto-refresh" type="checkbox">
+                <i class="switch" aria-hidden="true"></i>
+                <span>自动刷新</span>
+              </label>
+              <button id="export-audit-json" type="button">导出 JSON</button>
+              <button id="export-audit-csv" type="button">导出 CSV</button>
+            </div>
+            <div id="audit-retention-policy" class="audit-retention-policy">正在读取日志保留策略…</div>
+            <div id="audit-log-list" class="audit-log-list" aria-live="polite">
+              <div class="session-manager-loading">正在读取审计日志…</div>
             </div>
           </section>
         </div>
@@ -388,6 +489,21 @@
     </div>
   </dialog>
 
+  <dialog id="idle-cleanup-dialog" class="session-dialog" aria-labelledby="idle-cleanup-title">
+    <div class="session-dialog-card">
+      <div class="dialog-heading"><span class="dialog-mark" aria-hidden="true"></span><div>
+        <h2 id="idle-cleanup-title">清理空闲会话？</h2>
+        <p id="idle-cleanup-description"></p>
+      </div></div>
+      <div id="idle-cleanup-summary" class="idle-cleanup-summary"></div>
+      <div id="idle-cleanup-list" class="idle-cleanup-list"></div>
+      <div class="dialog-actions">
+        <button id="idle-cleanup-cancel" class="dialog-cancel" type="button">取消</button>
+        <button id="idle-cleanup-confirm" class="dialog-primary danger" type="button">结束这些会话</button>
+      </div>
+    </div>
+  </dialog>
+
   <div id="terminal-search" class="terminal-search" hidden>
     <input id="terminal-search-input" type="search" placeholder="搜索当前终端…" autocomplete="off">
     <span id="terminal-search-status"></span>
@@ -410,6 +526,13 @@
   <script>/*__SERIALIZE_JS__*/</script>
   <script>/*__SELECTION_JS__*/</script>
   <script>/*__SESSION_MANAGER_JS__*/</script>
+  <script>/*__RUNTIME_JS__*/</script>
+  <script>/*__SPLIT_LAYOUT_JS__*/</script>
+  <script>/*__AUDIT_LOG_JS__*/</script>
+  <script>/*__COMMAND_SNIPPETS_JS__*/</script>
+  <script>/*__TERMINAL_CONNECTION_JS__*/</script>
+  <script>/*__CONTEXT_MENU_JS__*/</script>
+  <script>/*__DIAGNOSTICS_JS__*/</script>
   <script>/*__TERMINAL_STATE_JS__*/</script>
   <script>/*__APP_JS__*/</script>
 </body>

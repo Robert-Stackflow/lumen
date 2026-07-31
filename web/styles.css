@@ -74,7 +74,9 @@ body {
 
 body,
 button,
-input {
+input,
+textarea,
+select {
   font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
@@ -91,6 +93,23 @@ a {
 
 button {
   color: inherit;
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: color-mix(in srgb, var(--muted) 72%, transparent);
+  opacity: 1;
+  font-weight: 450;
+  letter-spacing: 0;
+}
+
+input:focus::placeholder,
+textarea:focus::placeholder {
+  color: color-mix(in srgb, var(--muted) 54%, transparent);
 }
 
 button:focus-visible,
@@ -1408,7 +1427,8 @@ a:focus-visible {
   min-width: 0;
 }
 
-.settings-panel-heading > button {
+.settings-panel-heading > button,
+.settings-heading-actions > button {
   flex: none;
   height: 32px;
   padding: 0 13px;
@@ -1417,10 +1437,12 @@ a:focus-visible {
   background: var(--chrome-raised);
   color: var(--text);
   font-size: 11px;
+  font-weight: 560;
   cursor: pointer;
 }
 
-.settings-panel-heading > button:hover {
+.settings-panel-heading > button:hover,
+.settings-heading-actions > button:hover {
   border-color: color-mix(in srgb, var(--blue) 45%, var(--border));
   background: var(--surface-hover);
 }
@@ -1968,15 +1990,297 @@ a:focus-visible {
 
 .session-manager-list {
   display: grid;
+  width: 100%;
   gap: 10px;
   margin-top: 0;
 }
 
 .session-manager-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px;
+  grid-template-columns: minmax(0, 1fr) 142px 148px;
+  width: 100%;
   gap: 9px;
   margin-bottom: 12px;
+}
+
+.idle-cleanup-preview,
+.idle-cleanup-summary,
+.audit-retention-policy {
+  margin: -3px 0 12px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 48%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.idle-cleanup-summary {
+  margin: 16px 0 10px;
+  color: var(--text);
+}
+
+.audit-retention-policy {
+  margin: 0 0 12px;
+}
+
+.diagnostics-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.diagnostics-toolbar .custom-select {
+  width: 180px;
+}
+
+.diagnostics-toolbar > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.settings-heading-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.idle-cleanup-list,
+.diagnostics-list {
+  display: grid;
+  gap: 8px;
+}
+
+.idle-cleanup-list {
+  max-height: 260px;
+  margin: 14px 0;
+  overflow: auto;
+}
+
+.idle-cleanup-row,
+.diagnostic-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.idle-cleanup-row small,
+.diagnostic-row small,
+.diagnostic-row time {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.diagnostic-row {
+  grid-template-columns: 82px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.diagnostic-row > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.diagnostic-row strong {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.diagnostic-source {
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+  color: var(--red);
+  font-size: 10px;
+  text-align: center;
+}
+
+.session-manager-toolbar .custom-select {
+  width: 100%;
+}
+
+.audit-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 142px 132px;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.audit-toolbar .custom-select {
+  width: 100%;
+}
+
+.audit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: -3px 0 12px;
+}
+
+.audit-actions > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.audit-actions button {
+  min-height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.audit-actions button:hover {
+  background: var(--surface-hover);
+}
+
+.audit-auto-refresh {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.audit-auto-refresh input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.audit-auto-refresh .switch {
+  width: 32px;
+  height: 18px;
+}
+
+.audit-auto-refresh .switch::after {
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+}
+
+.audit-auto-refresh input:checked + .switch {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.audit-auto-refresh input:checked + .switch::after {
+  transform: translateX(14px);
+}
+
+.audit-toolbar input {
+  width: 100%;
+  height: 36px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: 0;
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  color: var(--text);
+}
+
+.audit-toolbar input:focus {
+  border-color: color-mix(in srgb, var(--blue) 58%, var(--border));
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.audit-toolbar span {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.audit-log-list {
+  display: grid;
+  gap: 7px;
+}
+
+.audit-log-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  min-height: 58px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 56%, transparent);
+}
+
+.audit-log-marker {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 10%, transparent);
+}
+
+.audit-log-row[data-event="login_failed"] .audit-log-marker,
+.audit-log-row[data-event="login_locked"] .audit-log-marker,
+.audit-log-row[data-event="session_terminated"] .audit-log-marker,
+.audit-log-row[data-event="connection_disconnected"] .audit-log-marker {
+  background: var(--red);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+.audit-log-row[data-event="login_success"] .audit-log-marker,
+.audit-log-row[data-event="ws_connected"] .audit-log-marker {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 10%, transparent);
+}
+
+.audit-log-body,
+.audit-log-meta {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.audit-log-body strong {
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.audit-log-body small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-log-meta {
+  justify-items: end;
+}
+
+.audit-log-meta time,
+.audit-log-meta code {
+  color: var(--muted);
+  font: 500 9px/1.3 ui-monospace, "SFMono-Regular", monospace;
+}
+
+.audit-log-meta code {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-manager-toolbar input,
@@ -2150,6 +2454,8 @@ a:focus-visible {
   border-radius: 7px;
   background: transparent;
   color: var(--text);
+  font-size: 11px;
+  font-weight: 560;
   cursor: pointer;
 }
 
@@ -2364,6 +2670,24 @@ a:focus-visible {
 }
 
 @media (max-width: 640px) {
+  .session-manager-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-heading-actions {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .settings-heading-actions > button {
+    flex: 1 0 auto;
+  }
+
   .session-manager-row {
     grid-template-columns: 1fr;
   }
@@ -2374,6 +2698,17 @@ a:focus-visible {
 
   .session-connection-row small {
     white-space: normal;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 

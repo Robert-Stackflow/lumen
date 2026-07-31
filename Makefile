@@ -26,13 +26,27 @@ check: build
 	python3 tests/theme_contract.py
 	python3 tests/session_schema.py
 	python3 tests/login_template.py
+	python3 tests/audit_contract.py
+	python3 tests/button_typography.py
+	python3 tests/placeholder_typography.py
+	python3 tests/operations_settings.py
 	@if command -v node >/dev/null 2>&1; then \
 		node tests/selection.js; \
 		node tests/session_manager.js; \
+		node tests/runtime.js; \
+		node tests/split_layout.js; \
+		node tests/audit_log.js; \
+		node tests/command_snippets.js; \
+		node tests/diagnostics.js; \
+		node --check web/context-menu.js; \
+		node --check web/terminal-connection.js; \
+		node --check web/diagnostics.js; \
+		node --check web/app.js; \
 	else \
 		echo "node unavailable; selection unit tests skipped"; \
 	fi
-	bash -n scripts/run-dev.sh scripts/install.sh scripts/bootstrap-debian.sh
+	bash -n scripts/run-dev.sh scripts/install.sh scripts/bootstrap-debian.sh \
+		scripts/lumen-shell-integration.sh
 	python3 -m py_compile scripts/lumen-auth
 	test -s dist/index.html
 	test -x bin/lumen-ttyd

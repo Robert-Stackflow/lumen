@@ -1,4 +1,5 @@
 #include <libwebsockets.h>
+#include <json-c/json.h>
 #include <openssl/crypto.h>
 #include <qrencode.h>
 #include <errno.h>
@@ -227,7 +228,7 @@ static bool action_request_valid(struct lws *wsi, const char *expected_action) {
     return false;
   lws_hdr_copy(wsi, origin, sizeof(origin), WSI_TOKEN_ORIGIN);
   lws_hdr_copy(wsi, host, sizeof(host), WSI_TOKEN_HOST);
-  if (!strcmp(origin, "null")) return true;
+  if (!origin[0] || !strcmp(origin, "null")) return false;
   if (server->auth && server->auth->mode == LUMEN_AUTH_SESSION)
     return lumen_auth_origin_valid(server->auth, origin, host);
 
@@ -431,7 +432,9 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "font-size:12px;font-weight:520}input{width:100%%;height:44px;margin:0 0 17px;padding:0 13px;border:1px solid "
       "var(--line);border-radius:10px;outline:none;background:var(--field);color:var(--strong);font:500 14px/1 "
       "ui-monospace,\"SFMono-Regular\",\"Cascadia Code\",Menlo,monospace;transition:border-color .14s,box-shadow .14s,"
-      "background-color .14s}input:hover{background:var(--hover)}input:focus{border-color:var(--blue);background:"
+      "background-color .14s}input::placeholder{color:color-mix(in srgb,var(--muted) 72%%,transparent);opacity:1;"
+      "font-weight:450;letter-spacing:0}input:focus::placeholder{color:color-mix(in srgb,var(--muted) 54%%,"
+      "transparent)}input:hover{background:var(--hover)}input:focus{border-color:var(--blue);background:"
       "var(--field);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 16%%,transparent)}button{width:100%%;"
       "height:44px;border:1px solid color-mix(in srgb,var(--green) 70%%,transparent);border-radius:10px;"
       "background:var(--green);color:var(--button-text);font-size:13px;font-weight:700;letter-spacing:.01em;"
@@ -641,10 +644,22 @@ static int complete_passkey_rename(struct lws *wsi, struct pss_http *pss) {
 }
 
 static int complete_preferences(struct lws *wsi, struct pss_http *pss) {
+  bool conflict = false;
   bool saved = pss->buffer && pss->body_len <= 131072 &&
-               lumen_auth_preferences_set(server->auth, pss->buffer);
+               lumen_auth_preferences_set(server->auth, pss->buffer, &conflict);
+  if (saved) lumen_auth_audit(server->auth, "preferences_updated", pss->client, "patch");
   pss_buffer_free(pss);
-  return send_empty(wsi, saved ? 204 : HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
+  if (saved) {
+    uint64_t version = 0;
+    char *preferences = lumen_auth_preferences_get(server->auth, &version);
+    free(preferences);
+    char *body = malloc(64);
+    if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+    int length = snprintf(body, 64, "{\"version\":%llu}", (unsigned long long)version);
+    return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                     body, (size_t)length, true, NULL, 0);
+  }
+  return send_empty(wsi, conflict ? 409 : HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
 }
 
 static char *totp_setup_json(const char *uri) {
@@ -690,7 +705,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
 
       char login_path[128], login_action[128], logout_action[128], passkey_options[128], passkey_login[128],
           passkeys_api[128], passkey_api[128], passkey_register_options[128], passkey_register[128],
-          preferences_api[128], totp_api[128], totp_setup[128], totp_confirm[128], session_api[128],
+          preferences_api[128], audit_api[128], totp_api[128], totp_setup[128], totp_confirm[128], session_api[128],
           sessions_api[128], health_api[128], healthz[128];
       endpoint_path(login_path, sizeof(login_path), "login");
       endpoint_path(login_action, sizeof(login_action), "auth/login");
@@ -702,6 +717,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       endpoint_path(passkey_register_options, sizeof(passkey_register_options), "api/passkeys/register/options");
       endpoint_path(passkey_register, sizeof(passkey_register), "api/passkeys/register");
       endpoint_path(preferences_api, sizeof(preferences_api), "api/preferences");
+      endpoint_path(audit_api, sizeof(audit_api), "api/audit-log");
       endpoint_path(totp_setup, sizeof(totp_setup), "api/totp/setup");
       endpoint_path(totp_api, sizeof(totp_api), "api/totp");
       endpoint_path(totp_confirm, sizeof(totp_confirm), "api/totp/confirm");
@@ -761,6 +777,31 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
         return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                          body, body_len, true, NULL, 0);
+      }
+      if (!strcmp(pss->path, audit_api)) {
+        if (method != LWSHUMETH_GET)
+          return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
+        if (check_auth(wsi) != AUTH_OK)
+          return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        char *entries = lumen_auth_audit_list(server->auth, 200);
+        if (!entries) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        size_t body_size = strlen(entries) + 160;
+        char *body = malloc(body_size);
+        if (!body) {
+          free(entries);
+          return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
+        int written = snprintf(body, body_size,
+                               "{\"entries\":%s,\"policy\":{\"maxBytes\":%lld,\"retentionFiles\":%d}}",
+                               entries, (long long)server->auth->audit_max_bytes,
+                               server->auth->audit_retention_files);
+        free(entries);
+        if (written < 0 || (size_t)written >= body_size) {
+          free(body);
+          return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
+        return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
+                         body, (size_t)written, true, NULL, 0);
       }
       if (!strncmp(pss->path, session_api, session_api_len)) {
         const char *session_id = pss->path + session_api_len;
@@ -943,7 +984,19 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
           if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
           if (method == LWSHUMETH_GET) {
-            char *body = lumen_auth_preferences_get(server->auth);
+            uint64_t version = 0;
+            char *raw = lumen_auth_preferences_get(server->auth, &version);
+            json_object *preferences = raw ? json_tokener_parse(raw) : NULL;
+            free(raw);
+            if (!preferences || !json_object_is_type(preferences, json_type_object)) {
+              if (preferences) json_object_put(preferences);
+              return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+            }
+            json_object_object_add(preferences, "_version", json_object_new_int64((int64_t)version));
+            const char *serialized =
+                json_object_to_json_string_ext(preferences, JSON_C_TO_STRING_PLAIN);
+            char *body = strdup(serialized);
+            json_object_put(preferences);
             return body ? send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8", body, strlen(body),
                                     true, NULL, 0)
                         : send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);

@@ -58,6 +58,8 @@ struct lumen_auth {
   char totp_secret_file[512];
   char rate_limit_state[512];
   char audit_log[512];
+  int64_t audit_max_bytes;
+  int audit_retention_files;
   char passkey_store[512];
   char preferences_file[512];
   int max_connections_per_ip;
@@ -87,6 +89,7 @@ void lumen_auth_client_key(struct lumen_auth *auth, struct lws *wsi, char *clien
 enum lumen_login_result lumen_auth_login(struct lumen_auth *auth, const char *client, const char *username,
                                          const char *password, const char *totp, int64_t *retry_after);
 void lumen_auth_audit(struct lumen_auth *auth, const char *event, const char *client, const char *detail);
+char *lumen_auth_audit_list(struct lumen_auth *auth, size_t limit);
 bool lumen_auth_ws_admit(struct lumen_auth *auth, const char *client);
 void lumen_auth_ws_connected(struct lumen_auth *auth, const char *client);
 void lumen_auth_ws_disconnected(struct lumen_auth *auth, const char *client);
@@ -102,8 +105,8 @@ char *lumen_auth_totp_begin(struct lumen_auth *auth, const char *client);
 bool lumen_auth_totp_confirm(struct lumen_auth *auth, const char *client, const char *code);
 bool lumen_auth_totp_remove(struct lumen_auth *auth, const char *client, const char *code);
 bool lumen_auth_totp_enabled(struct lumen_auth *auth);
-char *lumen_auth_preferences_get(struct lumen_auth *auth);
-bool lumen_auth_preferences_set(struct lumen_auth *auth, const char *json);
+char *lumen_auth_preferences_get(struct lumen_auth *auth, uint64_t *version);
+bool lumen_auth_preferences_set(struct lumen_auth *auth, const char *json, bool *conflict);
 
 int lumen_auth_new_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);
 int lumen_auth_clear_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);

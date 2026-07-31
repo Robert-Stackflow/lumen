@@ -19,6 +19,12 @@
     formatDuration,
     isCurrentConnection,
   } = globalThis.LumenSessionManager;
+  const { AdaptivePoller, preferencePatch } = globalThis.LumenRuntime;
+  const splitLayout = new globalThis.LumenSplitLayout();
+  const { EVENT_LABELS: AUDIT_EVENT_LABELS, filter: filterAuditEntries,
+    serialize: serializeAuditEntries } = globalThis.LumenAuditLog;
+  const { isDangerous: isDangerousSnippet, normalize: normalizeSnippet,
+    upsert: upsertSnippet } = globalThis.LumenCommandSnippets;
   const TERM_MINIMUM_CONTRAST = {
     dark: 1,
     light: 4.5,
@@ -97,6 +103,7 @@
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const sessions = new Map();
+  const authChannel = 'BroadcastChannel' in window ? new BroadcastChannel('lumen-auth') : null;
   const tabList = document.getElementById('tab-list');
   const stage = document.getElementById('terminal-stage');
   const splitDivider = document.createElement('button');
@@ -104,6 +111,10 @@
   splitDivider.className = 'split-divider';
   splitDivider.hidden = true;
   splitDivider.setAttribute('aria-label', '拖动调整分屏比例');
+  splitDivider.setAttribute('role', 'separator');
+  splitDivider.setAttribute('aria-valuemin', '25');
+  splitDivider.setAttribute('aria-valuemax', '75');
+  splitDivider.setAttribute('aria-valuenow', '50');
   stage.append(splitDivider);
   const addButton = document.getElementById('add-tab');
   const themeButton = document.getElementById('theme-toggle');
@@ -126,6 +137,7 @@
   const lineHeightValue = document.getElementById('setting-line-height-value');
   const workingDirectorySetting = document.getElementById('setting-working-directory');
   const inheritWorkingDirectorySetting = document.getElementById('setting-inherit-working-directory');
+  const persistTerminalStateSetting = document.getElementById('setting-persist-terminal-state');
   const shortcutSearchSetting = document.getElementById('setting-shortcut-search');
   const shortcutNewTabSetting = document.getElementById('setting-shortcut-new-tab');
   const exportTerminalButton = document.getElementById('export-terminal');
@@ -158,6 +170,19 @@
   const terminalSearchStatus = document.getElementById('terminal-search-status');
   const sessionManagerList = document.getElementById('session-manager-list');
   const refreshSessionManagerButton = document.getElementById('refresh-session-manager');
+  const cleanupIdleSessionsButton = document.getElementById('cleanup-idle-sessions');
+  const idleCleanupDialog = document.getElementById('idle-cleanup-dialog');
+  const idleCleanupList = document.getElementById('idle-cleanup-list');
+  const idleCleanupCancel = document.getElementById('idle-cleanup-cancel');
+  const idleCleanupConfirm = document.getElementById('idle-cleanup-confirm');
+  const idleCleanupDescription = document.getElementById('idle-cleanup-description');
+  const idleCleanupSummary = document.getElementById('idle-cleanup-summary');
+  const idleCleanupThreshold = document.getElementById('idle-cleanup-threshold');
+  const idleCleanupPreview = document.getElementById('idle-cleanup-preview');
+  const diagnosticsList = document.getElementById('diagnostics-list');
+  const diagnosticsSourceFilter = document.getElementById('diagnostics-source-filter');
+  const diagnosticsCount = document.getElementById('diagnostics-count');
+  const auditRetentionPolicy = document.getElementById('audit-retention-policy');
   const sessionManagerSearch = document.getElementById('session-manager-search');
   const sessionManagerSort = document.getElementById('session-manager-sort');
   const commandSnippetList = document.getElementById('command-snippet-list');
@@ -165,6 +190,13 @@
   const commandSnippetName = document.getElementById('command-snippet-name');
   const commandSnippetCommand = document.getElementById('command-snippet-command');
   const commandSnippetRun = document.getElementById('command-snippet-run');
+  const auditLogList = document.getElementById('audit-log-list');
+  const auditLogSearch = document.getElementById('audit-log-search');
+  const auditLogCount = document.getElementById('audit-log-count');
+  const refreshAuditLogButton = document.getElementById('refresh-audit-log');
+  const auditEventFilter = document.getElementById('audit-event-filter');
+  const auditTimeFilter = document.getElementById('audit-time-filter');
+  const auditAutoRefresh = document.getElementById('audit-auto-refresh');
   const connectionDialog = document.getElementById('connection-dialog');
   const connectionDialogDescription = document.getElementById('connection-dialog-description');
   const connectionDisconnectCancel = document.getElementById('connection-disconnect-cancel');
@@ -189,16 +221,14 @@
   const encodeBase64Url = value => btoa(String.fromCharCode(...new Uint8Array(value)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   let activeId = null;
-  let splitId = null;
-  let splitPrimaryId = null;
-  let splitDirection = 'vertical';
-  let splitRatio = 0.5;
   let editingSnippetId = null;
   let tokenPromise = null;
   let toastTimer = null;
   let preferencesSaveTimer = null;
   let preferencesReady = false;
   let preferencesDirty = false;
+  let lastSyncedPreferences = null;
+  let preferencesVersion = 0;
   let pingSequence = 0;
   let mobileCtrl = false;
   let pendingCloseId = null;
@@ -206,7 +236,12 @@
   let pendingConnection = null;
   let contextMenuRestoreFocus = null;
   let sessionInventory = [];
+  let auditEntries = [];
+  let auditEventCategory = 'all';
+  let auditTimeRange = 'all';
+  let diagnosticsSource = 'all';
   let sessionSort = 'created-desc';
+  const sessionNoteSaveTimers = new Map();
   const defaultFontSize = window.matchMedia('(max-width: 560px)').matches ? 13 : 14;
   let settings = loadSettings();
   let activeSettingsTab = 'general';
@@ -234,6 +269,8 @@
       lineHeight: 1.22,
       workingDirectory: '/home/ubuntu',
       inheritWorkingDirectory: true,
+      persistTerminalState: true,
+      idleCleanupSeconds: 1800,
       sessionNotes: {},
       commandSnippets: [],
       shortcuts: { search: 'Ctrl+Shift+F', newTab: 'Ctrl+Shift+T' },
@@ -265,18 +302,17 @@
           ? saved.workingDirectory.slice(0, 240) : defaults.workingDirectory,
         inheritWorkingDirectory: typeof saved?.inheritWorkingDirectory === 'boolean'
           ? saved.inheritWorkingDirectory : defaults.inheritWorkingDirectory,
+        persistTerminalState: typeof saved?.persistTerminalState === 'boolean'
+          ? saved.persistTerminalState : defaults.persistTerminalState,
+        idleCleanupSeconds: [1800, 3600, 21600, 86400].includes(Number(saved?.idleCleanupSeconds))
+          ? Number(saved.idleCleanupSeconds) : defaults.idleCleanupSeconds,
         sessionNotes: saved?.sessionNotes && typeof saved.sessionNotes === 'object'
           ? Object.fromEntries(Object.entries(saved.sessionNotes)
             .filter(([key, value]) => /^[A-Za-z0-9_-]{1,64}$/.test(key) && typeof value === 'string')
             .map(([key, value]) => [key, value.slice(0, 160)]))
           : {},
         commandSnippets: Array.isArray(saved?.commandSnippets)
-          ? saved.commandSnippets.filter(item => item && typeof item.command === 'string').slice(0, 40).map(item => ({
-            id: typeof item.id === 'string' ? item.id.slice(0, 64) : crypto.randomUUID(),
-            name: typeof item.name === 'string' ? item.name.slice(0, 40) : '未命名片段',
-            command: item.command.slice(0, 2000),
-            run: Boolean(item.run),
-          })) : [],
+          ? saved.commandSnippets.map(normalizeSnippet).filter(Boolean).slice(0, 40) : [],
         shortcuts: {
           search: saved?.shortcuts?.search || defaults.shortcuts.search,
           newTab: saved?.shortcuts?.newTab || defaults.shortcuts.newTab,
@@ -305,6 +341,12 @@
     clearTimeout(preferencesSaveTimer);
     preferencesSaveTimer = setTimeout(async () => {
       try {
+        const current = preferencesPayload();
+        const patch = preferencePatch(current, lastSyncedPreferences);
+        if (!Object.keys(patch).length) {
+          preferencesDirty = false;
+          return;
+        }
         const response = await fetch(`${basePath}/api/preferences`, {
           method: 'PUT',
           credentials: 'same-origin',
@@ -312,12 +354,25 @@
             'Content-Type': 'application/json',
             'X-Lumen-Action': 'preferences-update',
           },
-          body: JSON.stringify(preferencesPayload()),
+          body: JSON.stringify({ baseVersion: preferencesVersion, patch }),
         });
+        if (response.status === 409) {
+          await syncPreferences();
+          preferencesDirty = true;
+          schedulePreferencesSave();
+          return;
+        }
         if (!response.ok) throw new Error(`preferences update ${response.status}`);
-        preferencesDirty = false;
+        const saved = await response.json();
+        preferencesVersion = Number(saved.version || preferencesVersion);
+        lastSyncedPreferences = { ...(lastSyncedPreferences || {}), ...patch };
+        preferencesDirty = Object.keys(
+          preferencePatch(preferencesPayload(), lastSyncedPreferences),
+        ).length > 0;
+        if (preferencesDirty) schedulePreferencesSave();
       } catch (error) {
         console.warn('[lumen] could not save preferences', error);
+        globalThis.LumenDiagnostics.report('偏好同步', error);
       }
     }, 300);
   }
@@ -331,7 +386,10 @@
       });
       if (!response.ok) throw new Error(`preferences returned ${response.status}`);
       const remote = await response.json();
+      preferencesVersion = Number(remote?._version || 0);
+      delete remote._version;
       const hasRemote = remote && typeof remote === 'object' && Object.keys(remote).length > 0;
+      if (hasRemote) lastSyncedPreferences = structuredClone(remote);
       if (hasRemote && !preferencesDirty) {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(remote));
         settings = loadSettings();
@@ -352,6 +410,7 @@
     } catch (error) {
       preferencesReady = true;
       console.warn('[lumen] could not load preferences', error);
+      globalThis.LumenDiagnostics.report('偏好同步', error);
     }
   }
 
@@ -426,28 +485,6 @@
     if (timeout > 0) toastTimer = setTimeout(hideToast, timeout);
   }
 
-  const MENU_ICONS = {
-    activate: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
-    rename: '<path d="m4 16-.5 4 4-.5L18 9l-3-3L4 16Zm9-8 3 3"/>',
-    pin: '<path d="M9 4h6M10 4v5l-3 3h10l-3-3V4M12 12v9"/>',
-    unpin: '<path d="M10 4h5m-5 0v3m5-3v5l2 3h-5M12 12v3M4 4l16 16"/>',
-    readonly: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>',
-    writable: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M9 10V7a4 4 0 0 1 7.7-1.5"/>',
-    split: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M12 4v16"/>',
-    unsplit: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 8l8 8m0-8-8 8"/>',
-    copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
-    paste: '<path d="M9 5h6M9 3h6v4H9z"/><path d="M7 5H5v16h14V5h-2"/>',
-    search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/>',
-    select: '<path d="M7 3H3v4M17 3h4v4M7 21H3v-4M17 21h4v-4"/><path d="M8 9h8M8 13h8M8 17h5"/>',
-    export: '<path d="M12 3v12m-4-4 4 4 4-4"/><path d="M5 19h14"/>',
-    clear: '<path d="m4 15 8-11 8 11-5 5H9l-5-5Z"/><path d="m8 14 5 5"/>',
-    add: '<path d="M12 5v14M5 12h14"/>',
-    settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12h2M3 12h2M12 3v2m0 14v2M17 7l1.5-1.5M5.5 18.5 7 17m10 0 1.5 1.5M5.5 5.5 7 7"/>',
-    sessions: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
-    close: '<path d="m7 7 10 10M17 7 7 17"/>',
-    terminate: '<path d="M12 3v9"/><path d="M6.3 5.8a8 8 0 1 0 11.4 0"/>',
-  };
-
   function hideContextMenu(restoreFocus = false) {
     if (contextMenu.hidden) return;
     contextMenu.hidden = true;
@@ -462,48 +499,10 @@
     hideContextMenu();
     contextMenuRestoreFocus = restoreFocus;
 
-    for (const item of items) {
-      if (item.separator) {
-        const separator = document.createElement('div');
-        separator.className = 'context-menu-separator';
-        separator.setAttribute('role', 'separator');
-        contextMenu.append(separator);
-        continue;
-      }
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.setAttribute('role', 'menuitem');
-      button.disabled = Boolean(item.disabled);
-      button.classList.toggle('danger', Boolean(item.danger));
-      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      icon.setAttribute('viewBox', '0 0 24 24');
-      icon.setAttribute('aria-hidden', 'true');
-      icon.innerHTML = MENU_ICONS[item.icon] || '';
-      const label = document.createElement('span');
-      label.textContent = item.label;
-      const shortcut = document.createElement('kbd');
-      shortcut.textContent = item.shortcut || '';
-      button.append(icon, label, shortcut);
-      button.addEventListener('click', () => {
+    globalThis.LumenContextMenu.show(contextMenu, event, items, item => {
         hideContextMenu();
         item.action?.();
-      });
-      contextMenu.append(button);
-    }
-
-    contextMenu.hidden = false;
-    contextMenu.style.left = '0';
-    contextMenu.style.top = '0';
-    const rect = contextMenu.getBoundingClientRect();
-    const margin = 8;
-    const left = Math.max(margin, Math.min(event.clientX, window.innerWidth - rect.width - margin));
-    const top = Math.max(margin, Math.min(event.clientY, window.innerHeight - rect.height - margin));
-    contextMenu.style.left = `${left}px`;
-    contextMenu.style.top = `${top}px`;
-    contextMenu.style.transformOrigin =
-      `${event.clientX < left + rect.width / 2 ? 'left' : 'right'} `
-      + `${event.clientY < top + rect.height / 2 ? 'top' : 'bottom'}`;
-    contextMenu.querySelector('button:not(:disabled)')?.focus();
+    });
   }
 
   function copyWithSelection(text) {
@@ -740,14 +739,7 @@
       name: session.name,
       pinned: session.pinned,
     }));
-    const split = splitId && splitPrimaryId
-      ? {
-        primaryId: splitPrimaryId,
-        secondaryId: splitId,
-        direction: splitDirection,
-        ratio: splitRatio,
-      }
-      : null;
+    const split = splitLayout.serialize();
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ tabs, activeId, split }));
   }
 
@@ -822,18 +814,19 @@
   }
 
   function websocketUrl(id, connectionKey, skipReplay = false, readOnly = false) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${protocol}//${window.location.host}${basePath}/ws?arg=${encodeURIComponent(id)}`
-      + `&arg=${encodeURIComponent(connectionKey)}&arg=${skipReplay ? '1' : '0'}`
-      + `&arg=${readOnly ? '1' : '0'}`;
+    return globalThis.LumenTerminalConnection.websocketUrl(
+      window.location, basePath, id, connectionKey, skipReplay, readOnly,
+    );
   }
 
   function scheduleTerminalSnapshot(session) {
-    if (!session.serializeAddon || session.destroyed || session.restoring) return;
+    if (!settings.persistTerminalState || !session.serializeAddon || session.destroyed || session.restoring) return;
     clearTimeout(session.snapshotTimer);
-    session.snapshotTimer = setTimeout(async () => {
+    session.snapshotTimer = setTimeout(() => {
+      const persist = async () => {
       try {
         const data = session.serializeAddon.serialize({ scrollback: settings.scrollback });
+        if (new Blob([data]).size > 2 * 1024 * 1024) return;
         await globalThis.LumenTerminalState.save(session.id, {
           data,
           columns: session.term.cols,
@@ -843,11 +836,16 @@
         session.hasTerminalState = true;
       } catch (error) {
         console.warn('[lumen] could not persist terminal state', error);
+        globalThis.LumenDiagnostics.report('IndexedDB', error);
       }
-    }, 700);
+      };
+      if ('requestIdleCallback' in window) requestIdleCallback(() => void persist(), { timeout: 1500 });
+      else void persist();
+    }, 900);
   }
 
   async function restoreTerminalSnapshot(session) {
+    if (!settings.persistTerminalState) return false;
     try {
       const snapshot = await globalThis.LumenTerminalState.load(session.id);
       if (!snapshot?.data || typeof snapshot.data !== 'string') return false;
@@ -860,6 +858,7 @@
       return true;
     } catch (error) {
       console.warn('[lumen] could not restore terminal state', error);
+      globalThis.LumenDiagnostics.report('IndexedDB', error);
       return false;
     } finally {
       session.restoring = false;
@@ -1043,10 +1042,7 @@
         setTimeout(() => {
           if (!session.destroyed && session.socket === socket) {
             sendInput(session,
-              `cd -- '${quoted}'; if [ -z "$LUMEN_SHELL_INTEGRATION" ]; then `
-              + 'export LUMEN_SHELL_INTEGRATION=1; '
-              + `__lumen_osc7(){ printf '\\033]7;file://%s%s\\033\\\\' "$HOSTNAME" "$PWD"; }; `
-              + `PROMPT_COMMAND="__lumen_osc7\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}"; fi\r`);
+              `source /opt/lumen-terminal/scripts/lumen-shell-integration.sh 2>/dev/null; cd -- '${quoted}'\r`);
           }
         }, 120);
       }
@@ -1069,18 +1065,23 @@
         showToast(`“${session.name}”的连接已被管理员断开，刷新页面可重新连接`);
         return;
       }
+      if (event.code !== 1000) {
+        globalThis.LumenDiagnostics.report('WebSocket', `连接关闭：${event.code} ${event.reason || ''}`.trim());
+      }
       session.reconnectAttempts += 1;
       scheduleReconnect(session);
     });
 
     socket.addEventListener('error', () => {
+      globalThis.LumenDiagnostics.report('WebSocket', `会话 ${session.id} 连接异常`);
       if (socket === session.socket) socket.close();
     });
   }
 
   function scheduleReconnect(session) {
     if (session.destroyed) return;
-    const delay = Math.min(8000, 500 * (2 ** Math.min(session.reconnectAttempts, 4)));
+    const delay = Math.min(8000,
+      globalThis.LumenTerminalConnection.reconnectDelay(session.reconnectAttempts));
     const jitter = Math.round(Math.random() * 250);
     clearTimeout(session.reconnectTimer);
     session.reconnectTimer = setTimeout(() => connect(session), delay + jitter);
@@ -1273,6 +1274,7 @@
     mount.className = 'terminal-mount';
     const modeNotice = document.createElement('div');
     modeNotice.className = 'terminal-pane-mode';
+    modeNotice.setAttribute('role', 'status');
     modeNotice.hidden = true;
     modeNotice.textContent = '只读模式 · 键盘输入不会发送到会话';
     pane.append(mount);
@@ -1281,8 +1283,7 @@
     session.pane = pane;
     session.modeNotice = modeNotice;
     pane.addEventListener('pointerdown', () => {
-      if (splitId && session.id !== activeId
-          && (session.id === splitPrimaryId || session.id === splitId)) {
+      if (splitLayout.active && session.id !== activeId && splitLayout.contains(session.id)) {
         activateSession(session.id);
       }
     }, true);
@@ -1366,7 +1367,7 @@
       }
     });
     term.onResize(() => {
-      if (session.id === activeId || session.id === splitPrimaryId || session.id === splitId) {
+      if (session.id === activeId || splitLayout.contains(session.id)) {
         scheduleResize(session);
       }
       scheduleSelectionOverlay(session);
@@ -1418,14 +1419,14 @@
     const session = sessions.get(id);
     if (!session) return;
     hideContextMenu();
-    const isSplitMember = splitId && (id === splitPrimaryId || id === splitId);
+    const isSplitMember = splitLayout.contains(id);
     activeId = id;
 
     for (const candidate of sessions.values()) {
       const active = candidate.id === id;
-      const secondary = candidate.id === splitId;
+      const secondary = candidate.id === splitLayout.secondaryId;
       const visible = isSplitMember
-        ? candidate.id === splitPrimaryId || secondary
+        ? candidate.id === splitLayout.primaryId || secondary
         : active;
       candidate.tab.setAttribute('aria-selected', active ? 'true' : 'false');
       candidate.tab.setAttribute('tabindex', active ? '0' : '-1');
@@ -1437,9 +1438,12 @@
     stage.classList.toggle('is-split', Boolean(isSplitMember));
     stage.classList.toggle(
       'is-split-horizontal',
-      Boolean(isSplitMember && splitDirection === 'horizontal'),
+      Boolean(isSplitMember && splitLayout.direction === 'horizontal'),
     );
-    stage.style.setProperty('--split-ratio', `${splitRatio * 100}%`);
+    stage.style.setProperty('--split-ratio', `${splitLayout.ratio * 100}%`);
+    splitDivider.setAttribute('aria-orientation',
+      splitLayout.direction === 'horizontal' ? 'horizontal' : 'vertical');
+    splitDivider.setAttribute('aria-valuenow', String(Math.round(splitLayout.ratio * 100)));
     splitDivider.hidden = !isSplitMember;
 
     document.title = `${session.name} — Lumen`;
@@ -1447,41 +1451,40 @@
     requestAnimationFrame(() => {
       scheduleResize(session);
       if (isSplitMember) {
-        scheduleResize(sessions.get(splitPrimaryId));
-        scheduleResize(sessions.get(splitId));
+        scheduleResize(sessions.get(splitLayout.primaryId));
+        scheduleResize(sessions.get(splitLayout.secondaryId));
       }
       session.term.focus();
     });
     saveState();
   }
 
-  function toggleSplitSession(session, direction = splitDirection) {
+  function toggleSplitSession(session, direction = splitLayout.direction) {
     if (session.id === activeId) {
-      if (splitId) {
+      if (splitLayout.active) {
         closeSplit();
       } else {
         showToast('请选择另一个标签加入分屏');
       }
       return;
     }
-    const closesExisting = splitId === session.id && splitDirection === direction;
-    if (!splitId || (session.id !== splitPrimaryId && session.id !== splitId)) {
-      splitPrimaryId = activeId;
-    }
-    splitDirection = direction;
-    splitId = closesExisting ? null : session.id;
-    if (!splitId) splitPrimaryId = null;
+    const closesExisting =
+      splitLayout.secondaryId === session.id && splitLayout.direction === direction;
+    const primaryId = !splitLayout.active || !splitLayout.contains(session.id)
+      ? activeId
+      : splitLayout.primaryId;
+    if (closesExisting) splitLayout.close();
+    else splitLayout.open(primaryId, session.id, direction);
     activateSession(activeId);
-    showToast(splitId
-      ? `已在${splitDirection === 'horizontal' ? '下方' : '右侧'}打开“${session.name}”`
+    showToast(splitLayout.active
+      ? `已在${splitLayout.direction === 'horizontal' ? '下方' : '右侧'}打开“${session.name}”`
       : '分屏已关闭');
   }
 
   function closeSplit(notify = true, restoreFocus = true) {
-    if (!splitId) return;
+    if (!splitLayout.active) return;
     const focused = sessions.get(activeId);
-    splitId = null;
-    splitPrimaryId = null;
+    splitLayout.close();
     stage.classList.remove('is-split', 'is-split-horizontal', 'is-resizing-split');
     splitDivider.hidden = true;
     for (const candidate of sessions.values()) {
@@ -1507,7 +1510,7 @@
     const index = ordered.indexOf(id);
     const session = sessions.get(id);
     if (!session) return;
-    if (splitId && (splitId === id || splitPrimaryId === id)) closeSplit(false, false);
+    if (splitLayout.contains(id)) closeSplit(false, false);
 
     session.destroyed = true;
     clearTimeout(session.reconnectTimer);
@@ -1532,14 +1535,6 @@
     sessions.delete(id);
 
     if (activeId === id) {
-      if (splitId && sessions.has(splitId)) {
-        const nextActiveId = splitId;
-        splitId = null;
-        activateSession(nextActiveId);
-        saveState();
-        showToast(message);
-        return;
-      }
       const remaining = [...sessions.keys()];
       activateSession(remaining[Math.min(index, remaining.length - 1)]);
     }
@@ -1591,6 +1586,8 @@
     session.readOnly = Boolean(readOnly);
     session.tab.classList.toggle('is-readonly', session.readOnly);
     session.tab.dataset.readonly = session.readOnly ? 'true' : 'false';
+    session.tab.setAttribute('aria-description',
+      session.readOnly ? '只读连接，键盘输入不会发送到会话' : '可交互连接');
     session.modeNotice.hidden = !session.readOnly;
     session.tab.querySelector('.connection-dot').title =
       session.readOnly ? '只读连接' : '可交互连接';
@@ -1601,6 +1598,17 @@
       scheduleReconnect(session);
     }
     showToast(session.readOnly ? '已切换为只读连接' : '已恢复终端输入');
+  }
+
+  function claimSessionSize(session) {
+    if (session.readOnly) {
+      showToast('只读连接不能接管终端尺寸');
+      return;
+    }
+    sendInput(session, '\x1b]777;lumen-claim-size\x07');
+    scheduleResize(session);
+    showToast('当前连接已接管终端尺寸');
+    setTimeout(() => void refreshSessionInventory(), 250);
   }
 
   function closeSessionDialog() {
@@ -1704,9 +1712,9 @@
       const session = sessions.get(activeId);
       if (session) {
         scheduleResize(session);
-        const primary = sessions.get(splitPrimaryId);
+        const primary = sessions.get(splitLayout.primaryId);
         if (primary && primary !== session) scheduleResize(primary);
-        const secondary = sessions.get(splitId);
+        const secondary = sessions.get(splitLayout.secondaryId);
         if (secondary) scheduleResize(secondary);
         session.term.focus();
       }
@@ -1825,8 +1833,7 @@
   }
 
   function tabContextItems(session) {
-    const isSplitMember = Boolean(splitId)
-      && (session.id === splitPrimaryId || session.id === splitId);
+    const isSplitMember = splitLayout.contains(session.id);
     const splitItems = isSplitMember
       ? [{
         label: '退出分屏',
@@ -1869,6 +1876,12 @@
         label: session.readOnly ? '恢复终端输入' : '切换为只读',
         icon: session.readOnly ? 'writable' : 'readonly',
         action: () => setSessionReadOnly(session, !session.readOnly),
+      },
+      {
+        label: '接管终端尺寸',
+        icon: 'activate',
+        disabled: session.readOnly || session.state !== 'online',
+        action: () => claimSessionSize(session),
       },
       ...splitItems,
       { label: '导出终端输出', icon: 'export', action: () => exportCurrentTerminal(session) },
@@ -2010,13 +2023,18 @@
         session.connections.hidden = count < 2;
         session.connections.title = `当前 ${count} 个连接`;
       }
-      if (activeSettingsTab === 'sessions' && settingsDialog.open) renderSessionManager();
+      if (activeSettingsTab === 'sessions' && settingsDialog.open) {
+        renderIdleCleanupPreview();
+        renderSessionManager();
+      }
     } catch (error) {
       console.warn('[lumen] could not refresh sessions', error);
     }
   }
 
   function renderSessionManager() {
+    if (sessionManagerList.contains(document.activeElement)
+        && document.activeElement.classList.contains('session-note-input')) return;
     sessionManagerList.replaceChildren();
     if (!sessionInventory.length) {
       sessionManagerList.innerHTML = '<div class="session-manager-loading">当前没有后台会话</div>';
@@ -2048,7 +2066,7 @@
       body.className = 'session-manager-body';
       const copy = document.createElement('span');
       copy.className = 'session-manager-summary';
-      copy.innerHTML = `<strong></strong><small></small>`;
+      copy.innerHTML = '<strong></strong><small></small><small class="session-runtime"></small>';
       const title = copy.querySelector('strong');
       title.textContent = session?.name || item.id;
       const countBadge = document.createElement('span');
@@ -2058,18 +2076,33 @@
       const createdAt = Number(item.createdAt || 0) * 1000;
       copy.querySelector('small').textContent =
         `${item.id} · 创建于 ${formatDateTime(createdAt)} · PID ${item.pid} · ${item.rows}×${item.columns}`;
+      const memory = Number(item.memoryKb || 0);
+      copy.querySelector('.session-runtime').textContent = [
+        item.foregroundCommand ? `前台 ${item.foregroundCommand} (${item.foregroundPid})` : '',
+        item.workingDirectory || '',
+        memory ? `内存 ${(memory / 1024).toFixed(memory >= 10240 ? 0 : 1)} MiB` : '',
+        `CPU ${Number(item.cpuPercent || 0).toFixed(1)}%`,
+      ].filter(Boolean).join(' · ');
       const note = document.createElement('input');
       note.className = 'session-note-input';
       note.type = 'text';
       note.maxLength = 160;
       note.placeholder = '添加备注';
       note.value = settings.sessionNotes[item.id] || '';
-      note.addEventListener('change', () => {
+      const saveNote = () => {
         const value = note.value.trim().slice(0, 160);
         if (value) settings.sessionNotes[item.id] = value;
         else delete settings.sessionNotes[item.id];
         saveSettings();
-        showToast('会话备注已保存');
+        sessionNoteSaveTimers.delete(item.id);
+      };
+      note.addEventListener('input', () => {
+        clearTimeout(sessionNoteSaveTimers.get(item.id));
+        sessionNoteSaveTimers.set(item.id, setTimeout(saveNote, 600));
+      });
+      note.addEventListener('change', () => {
+        clearTimeout(sessionNoteSaveTimers.get(item.id));
+        saveNote();
       });
       const activate = document.createElement('button');
       activate.type = 'button';
@@ -2089,7 +2122,22 @@
       });
       const actions = document.createElement('span');
       actions.className = 'session-manager-actions';
-      actions.append(activate, terminate);
+      const copyInfo = document.createElement('button');
+      copyInfo.type = 'button';
+      copyInfo.textContent = '复制';
+      copyInfo.addEventListener('click', () => {
+        const text = [
+          `会话: ${session?.name || item.id} (${item.id})`,
+          `创建: ${formatDateTime(createdAt)}`,
+          `连接: ${item.clients}`,
+          `前台进程: ${item.foregroundCommand || '-'} (${item.foregroundPid || '-'})`,
+          `工作目录: ${item.workingDirectory || '-'}`,
+          `终端尺寸: ${item.columns}×${item.rows}`,
+          `内存: ${item.memoryKb || 0} KiB`,
+        ].join('\n');
+        void writeSystemClipboard(text, true, true);
+      });
+      actions.append(activate, copyInfo, terminate);
       const connections = document.createElement('div');
       connections.className = 'session-connections';
       const connectionItems = Array.isArray(item.connections) ? item.connections : [];
@@ -2110,6 +2158,18 @@
           const badge = document.createElement('em');
           badge.className = 'current-connection-badge';
           badge.textContent = '当前连接';
+          connectionTitle.append(badge);
+        }
+        if (connection.sizeOwner) {
+          const badge = document.createElement('em');
+          badge.className = 'current-connection-badge size-owner-badge';
+          badge.textContent = '尺寸控制';
+          connectionTitle.append(badge);
+        }
+        if (connection.readOnly) {
+          const badge = document.createElement('em');
+          badge.className = 'current-connection-badge readonly-connection-badge';
+          badge.textContent = '只读';
           connectionTitle.append(badge);
         }
         info.querySelector('small').textContent =
@@ -2176,7 +2236,206 @@
 
   function loadSessionManager() {
     sessionManagerList.innerHTML = '<div class="session-manager-loading">正在读取会话…</div>';
+    renderIdleCleanupPreview();
     void refreshSessionInventory();
+  }
+
+  function idleSessionCandidates() {
+    const cutoff = Date.now() / 1000 - settings.idleCleanupSeconds;
+    return sessionInventory.filter(item =>
+      Number(item.clients) === 0 && Number(item.lastActivityAt || item.createdAt) < cutoff);
+  }
+
+  function cleanupResourceSummary(candidates) {
+    const kib = candidates.reduce((sum, item) =>
+      sum + Number(item.memoryKb || 0) + Number(item.historyBytes || 0) / 1024, 0);
+    return {
+      count: candidates.length,
+      mib: kib / 1024,
+    };
+  }
+
+  function idleThresholdLabel() {
+    if (settings.idleCleanupSeconds < 3600) return `${settings.idleCleanupSeconds / 60} 分钟`;
+    return `${settings.idleCleanupSeconds / 3600} 小时`;
+  }
+
+  function renderIdleCleanupPreview() {
+    const summary = cleanupResourceSummary(idleSessionCandidates());
+    cleanupIdleSessionsButton.disabled = summary.count === 0;
+    cleanupIdleSessionsButton.textContent = summary.count ? `清理空闲 · ${summary.count}` : '清理空闲';
+    idleCleanupPreview.textContent = summary.count
+      ? `当前有 ${summary.count} 个零连接会话超过 ${idleThresholdLabel()}，预计释放约 ${summary.mib.toFixed(1)} MiB 已统计资源`
+      : `当前没有零连接会话超过 ${idleThresholdLabel()}`;
+  }
+
+  function openIdleCleanup() {
+    const candidates = idleSessionCandidates();
+    if (!candidates.length) {
+      showToast(`没有超过 ${idleThresholdLabel()}且无人连接的空闲会话`);
+      return;
+    }
+    const summary = cleanupResourceSummary(candidates);
+    idleCleanupDescription.textContent =
+      `以下会话已超过 ${idleThresholdLabel()}没有活动且当前无人连接。结束后无法恢复。`;
+    idleCleanupSummary.textContent =
+      `${summary.count} 个会话 · 预计释放约 ${summary.mib.toFixed(1)} MiB 已统计内存与历史缓存`;
+    idleCleanupList.replaceChildren(...candidates.map(item => {
+      const row = document.createElement('div');
+      row.className = 'idle-cleanup-row';
+      const name = sessions.get(item.id)?.name || item.id;
+      const minutes = Math.floor((Date.now() / 1000 - Number(item.lastActivityAt || item.createdAt)) / 60);
+      row.innerHTML = '<strong></strong><small></small>';
+      row.querySelector('strong').textContent = name;
+      row.querySelector('small').textContent = `${item.id} · 已空闲 ${minutes} 分钟`;
+      return row;
+    }));
+    idleCleanupDialog.showModal();
+  }
+
+  async function cleanupIdleSessions() {
+    const candidates = idleSessionCandidates();
+    idleCleanupConfirm.disabled = true;
+    try {
+      for (const item of candidates) {
+        const response = await fetch(`${basePath}/api/sessions/${encodeURIComponent(item.id)}`, {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-Lumen-Action': 'terminate' },
+        });
+        if (!response.ok && response.status !== 404) throw new Error(`terminate ${item.id}: ${response.status}`);
+      }
+      idleCleanupDialog.close();
+      showToast(`已清理 ${candidates.length} 个空闲会话`);
+      await refreshSessionInventory();
+    } catch (error) {
+      globalThis.LumenDiagnostics.report('会话清理', error);
+      showToast('空闲会话清理未能全部完成');
+    } finally {
+      idleCleanupConfirm.disabled = false;
+    }
+  }
+
+  function renderDiagnostics() {
+    const entries = filteredDiagnostics();
+    diagnosticsCount.textContent = `${entries.length} 条异常`;
+    diagnosticsList.replaceChildren();
+    if (!entries.length) {
+      diagnosticsList.innerHTML = '<div class="session-manager-loading">暂无异常</div>';
+      return;
+    }
+    for (const entry of entries) {
+      const row = document.createElement('article');
+      row.className = 'diagnostic-row';
+      row.innerHTML = '<span class="diagnostic-source"></span><span><strong></strong><small></small></span><time></time>';
+      row.querySelector('.diagnostic-source').textContent = entry.source;
+      row.querySelector('strong').textContent = entry.message;
+      row.querySelector('small').textContent = entry.count > 1 ? `重复 ${entry.count} 次` : '首次出现';
+      row.querySelector('time').textContent = formatDateTime(entry.timestamp);
+      diagnosticsList.append(row);
+    }
+  }
+
+  function filteredDiagnostics() {
+    return globalThis.LumenDiagnostics.filter(diagnosticsSource);
+  }
+
+  function diagnosticsJson() {
+    return globalThis.LumenDiagnostics.serialize(diagnosticsSource);
+  }
+
+  function exportDiagnostics() {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([diagnosticsJson()], {
+      type: 'application/json;charset=utf-8',
+    }));
+    link.download = `lumen-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  }
+
+  function renderAuditLog() {
+    const query = auditLogSearch.value.trim().toLocaleLowerCase();
+    const entries = filterAuditEntries(auditEntries, {
+      query,
+      category: auditEventCategory,
+      range: auditTimeRange,
+    });
+    const sensitive = entries.filter(entry =>
+      ['login_failed', 'login_locked', 'session_terminated', 'connection_disconnected',
+        'passkey_deleted', 'totp_removed'].includes(entry.event)).length;
+    auditLogCount.textContent = `${entries.length} 条记录${sensitive ? ` · ${sensitive} 条敏感事件` : ''}`;
+    auditLogList.replaceChildren();
+    if (!entries.length) {
+      auditLogList.innerHTML = '<div class="session-manager-loading">没有匹配的审计记录</div>';
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const entry of entries) {
+      const row = document.createElement('article');
+      row.className = 'audit-log-row';
+      row.dataset.event = entry.event;
+      const marker = document.createElement('span');
+      marker.className = 'audit-log-marker';
+      const body = document.createElement('span');
+      body.className = 'audit-log-body';
+      const title = document.createElement('strong');
+      title.textContent = AUDIT_EVENT_LABELS[entry.event] || entry.event;
+      const detail = document.createElement('small');
+      detail.textContent = entry.detail && entry.detail !== '-' ? entry.detail : '无附加详情';
+      body.append(title, detail);
+      const meta = document.createElement('span');
+      meta.className = 'audit-log-meta';
+      const time = Date.parse(entry.timestamp);
+      const timeNode = document.createElement('time');
+      timeNode.dateTime = entry.timestamp;
+      timeNode.textContent = Number.isFinite(time) ? formatDateTime(time) : entry.timestamp;
+      const client = document.createElement('code');
+      client.textContent = entry.client || '未知来源';
+      meta.append(timeNode, client);
+      row.append(marker, body, meta);
+      fragment.append(row);
+    }
+    auditLogList.append(fragment);
+  }
+
+  async function refreshAuditLog() {
+    auditLogList.innerHTML = '<div class="session-manager-loading">正在读取审计日志…</div>';
+    refreshAuditLogButton.disabled = true;
+    try {
+      const response = await fetch(`${basePath}/api/audit-log`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+      });
+      if (response.status === 401 || response.redirected) {
+        window.location.assign(`${basePath}/login`);
+        return;
+      }
+      if (!response.ok) throw new Error(`audit log returned ${response.status}`);
+      const result = await response.json();
+      auditEntries = Array.isArray(result) ? result : Array.isArray(result.entries) ? result.entries : [];
+      const policy = Array.isArray(result) ? null : result.policy;
+      auditRetentionPolicy.textContent = policy
+        ? `轮转策略：单文件 ${(Number(policy.maxBytes) / 1024 / 1024).toFixed(0)} MiB，保留 ${Number(policy.retentionFiles)} 份历史文件`
+        : '轮转策略暂不可用';
+      renderAuditLog();
+    } catch (error) {
+      console.warn('[lumen] could not read audit log', error);
+      auditLogList.innerHTML = '<div class="session-manager-loading">无法读取审计日志</div>';
+    } finally {
+      refreshAuditLogButton.disabled = false;
+    }
+  }
+
+  function exportAuditLog(format) {
+    const content = serializeAuditEntries(auditEntries, format);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([content], {
+      type: format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8',
+    }));
+    link.download = `lumen-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.${format}`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
   }
 
   function renderCommandSnippets() {
@@ -2202,9 +2461,20 @@
           showToast(session?.readOnly ? '当前终端处于只读模式' : '没有可用的终端');
           return;
         }
-        sendInput(session, snippet.command + (snippet.run ? '\r' : ''));
-        settingsDialog.close();
-        session.term.focus();
+        const execute = () => {
+          sendInput(session, snippet.command + (snippet.run ? '\r' : ''));
+          settingsDialog.close();
+          session.term.focus();
+        };
+        const looksDangerous = snippet.run && isDangerousSnippet(snippet.command);
+        if (looksDangerous) {
+          showToast('此片段包含可能破坏数据的命令', 12000, {
+            label: '仍然执行',
+            handler: execute,
+          });
+          return;
+        }
+        execute();
       });
       const edit = document.createElement('button');
       edit.type = 'button';
@@ -2255,9 +2525,7 @@
       command,
       run: commandSnippetRun.checked,
     };
-    const index = settings.commandSnippets.findIndex(item => item.id === editingSnippetId);
-    if (index >= 0) settings.commandSnippets[index] = snippet;
-    else settings.commandSnippets.push(snippet);
+    settings.commandSnippets = upsertSnippet(settings.commandSnippets, snippet);
     saveSettings();
     closeSnippetEditor();
     renderCommandSnippets();
@@ -2308,6 +2576,8 @@
     lineHeightValue.value = settings.lineHeight.toFixed(2);
     workingDirectorySetting.value = settings.workingDirectory;
     inheritWorkingDirectorySetting.checked = settings.inheritWorkingDirectory;
+    persistTerminalStateSetting.checked = settings.persistTerminalState;
+    setCustomSelect(idleCleanupThreshold, String(settings.idleCleanupSeconds));
     shortcutSearchSetting.value = settings.shortcuts.search;
     shortcutNewTabSetting.value = settings.shortcuts.newTab;
   }
@@ -2332,6 +2602,8 @@
     if (activeSettingsTab === 'security') void refreshTotpStatus();
     if (activeSettingsTab === 'sessions') loadSessionManager();
     if (activeSettingsTab === 'snippets') renderCommandSnippets();
+    if (activeSettingsTab === 'audit') void refreshAuditLog();
+    if (activeSettingsTab === 'diagnostics') renderDiagnostics();
   }
 
   function openPasskeyActionDialog(mode, item) {
@@ -2519,6 +2791,17 @@
   settingsButton.addEventListener('click', openSettings);
   for (const tab of settingsTabs) {
     tab.addEventListener('click', () => activateSettingsTab(tab.dataset.settingsTab));
+    tab.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const index = settingsTabs.indexOf(tab);
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? settingsTabs.length - 1
+          : (index + (event.key === 'ArrowDown' ? 1 : -1) + settingsTabs.length)
+            % settingsTabs.length;
+      settingsTabs[next].focus();
+      activateSettingsTab(settingsTabs[next].dataset.settingsTab);
+    });
   }
   registerPasskeyButton.addEventListener('click', async () => {
     if (!window.PublicKeyCredential) {
@@ -2723,6 +3006,11 @@
     settings.inheritWorkingDirectory = inheritWorkingDirectorySetting.checked;
     saveSettings();
   });
+  persistTerminalStateSetting.addEventListener('change', () => {
+    settings.persistTerminalState = persistTerminalStateSetting.checked;
+    if (!settings.persistTerminalState) void globalThis.LumenTerminalState.clear();
+    saveSettings();
+  });
   captureShortcut(shortcutSearchSetting, 'search');
   captureShortcut(shortcutNewTabSetting, 'newTab');
   installCustomSelect(cursorStyleSetting, value => {
@@ -2739,11 +3027,32 @@
     sessionSort = value;
     renderSessionManager();
   });
+  installCustomSelect(idleCleanupThreshold, value => {
+    settings.idleCleanupSeconds = Number(value);
+    saveSettings();
+    renderIdleCleanupPreview();
+  });
+  installCustomSelect(diagnosticsSourceFilter, value => {
+    diagnosticsSource = value;
+    renderDiagnostics();
+  });
+  installCustomSelect(auditEventFilter, value => {
+    auditEventCategory = value;
+    renderAuditLog();
+  });
+  installCustomSelect(auditTimeFilter, value => {
+    auditTimeRange = value;
+    renderAuditLog();
+  });
   exportTerminalButton.addEventListener('click', () => exportCurrentTerminal());
   logoutSessionButton.addEventListener('click', async () => {
     logoutSessionButton.disabled = true;
     logoutSessionButton.textContent = '正在退出…';
     try {
+      authChannel?.postMessage({ type: 'logout' });
+      for (const session of sessions.values()) {
+        if (session.socket?.readyState < WebSocket.CLOSING) session.socket.close(1000, 'logout');
+      }
       const response = await fetch(`${basePath}/auth/logout`, {
         method: 'POST',
         credentials: 'same-origin',
@@ -2753,6 +3062,7 @@
       if (response.status !== 0 && response.status !== 303 && !response.ok) {
         throw new Error(`logout returned ${response.status}`);
       }
+      await globalThis.LumenTerminalState.clear();
       window.location.assign(`${basePath}/login`);
     } catch (error) {
       console.error('[lumen] logout failed', error);
@@ -2761,7 +3071,35 @@
       showToast('退出登录失败，请稍后重试');
     }
   });
+  authChannel?.addEventListener('message', event => {
+    if (event.data?.type !== 'logout') return;
+    for (const session of sessions.values()) {
+      session.destroyed = true;
+      clearTimeout(session.reconnectTimer);
+      if (session.socket?.readyState < WebSocket.CLOSING) session.socket.close(1000, 'logout');
+    }
+    window.location.assign(`${basePath}/login`);
+  });
   refreshSessionManagerButton.addEventListener('click', loadSessionManager);
+  cleanupIdleSessionsButton.addEventListener('click', openIdleCleanup);
+  idleCleanupCancel.addEventListener('click', () => idleCleanupDialog.close());
+  idleCleanupConfirm.addEventListener('click', () => void cleanupIdleSessions());
+  document.getElementById('clear-diagnostics').addEventListener('click', () => {
+    globalThis.LumenDiagnostics.clear();
+    showToast('前端错误记录已清空');
+  });
+  document.getElementById('copy-diagnostics').addEventListener('click', () => {
+    const copied = copyWithSelection(diagnosticsJson());
+    showToast(copied ? '诊断记录已复制' : '无法复制诊断记录');
+  });
+  document.getElementById('export-diagnostics').addEventListener('click', exportDiagnostics);
+  globalThis.LumenDiagnostics.subscribe(() => {
+    if (activeSettingsTab === 'diagnostics' && settingsDialog.open) renderDiagnostics();
+  });
+  refreshAuditLogButton.addEventListener('click', () => void refreshAuditLog());
+  auditLogSearch.addEventListener('input', renderAuditLog);
+  document.getElementById('export-audit-json').addEventListener('click', () => exportAuditLog('json'));
+  document.getElementById('export-audit-csv').addEventListener('click', () => exportAuditLog('csv'));
   sessionManagerSearch.addEventListener('input', renderSessionManager);
   document.getElementById('add-command-snippet').addEventListener('click', () => openSnippetEditor());
   document.getElementById('cancel-command-snippet').addEventListener('click', closeSnippetEditor);
@@ -2816,9 +3154,9 @@
   const resizeObserver = new ResizeObserver(() => {
     const session = sessions.get(activeId);
     if (session) scheduleResize(session);
-    const primary = sessions.get(splitPrimaryId);
+    const primary = sessions.get(splitLayout.primaryId);
     if (primary && primary !== session) scheduleResize(primary);
-    const secondary = sessions.get(splitId);
+    const secondary = sessions.get(splitLayout.secondaryId);
     if (secondary) scheduleResize(secondary);
   });
   resizeObserver.observe(stage);
@@ -2831,13 +3169,14 @@
   splitDivider.addEventListener('pointermove', event => {
     if (!splitDivider.hasPointerCapture(event.pointerId)) return;
     const bounds = stage.getBoundingClientRect();
-    const raw = splitDirection === 'horizontal'
+    const raw = splitLayout.direction === 'horizontal'
       ? (event.clientY - bounds.top) / bounds.height
       : (event.clientX - bounds.left) / bounds.width;
-    splitRatio = Math.min(0.75, Math.max(0.25, raw));
-    stage.style.setProperty('--split-ratio', `${splitRatio * 100}%`);
-    const primary = sessions.get(splitPrimaryId);
-    const secondary = sessions.get(splitId);
+    splitLayout.resize(raw);
+    stage.style.setProperty('--split-ratio', `${splitLayout.ratio * 100}%`);
+    splitDivider.setAttribute('aria-valuenow', String(Math.round(splitLayout.ratio * 100)));
+    const primary = sessions.get(splitLayout.primaryId);
+    const secondary = sessions.get(splitLayout.secondaryId);
     if (primary) scheduleResize(primary);
     if (secondary) scheduleResize(secondary);
   });
@@ -2849,6 +3188,21 @@
   };
   splitDivider.addEventListener('pointerup', stopSplitResize);
   splitDivider.addEventListener('pointercancel', stopSplitResize);
+  splitDivider.addEventListener('keydown', event => {
+    const backward = splitLayout.direction === 'horizontal' ? 'ArrowUp' : 'ArrowLeft';
+    const forward = splitLayout.direction === 'horizontal' ? 'ArrowDown' : 'ArrowRight';
+    if (![backward, forward, 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0.25
+      : event.key === 'End' ? 0.75
+        : splitLayout.ratio + (event.key === forward ? 0.05 : -0.05);
+    splitLayout.resize(next);
+    stage.style.setProperty('--split-ratio', `${splitLayout.ratio * 100}%`);
+    splitDivider.setAttribute('aria-valuenow', String(Math.round(splitLayout.ratio * 100)));
+    scheduleResize(sessions.get(splitLayout.primaryId));
+    scheduleResize(sessions.get(splitLayout.secondaryId));
+    saveState();
+  });
 
   window.addEventListener('keydown', event => {
     if (event.ctrlKey && event.shiftKey && event.code === 'Enter') {
@@ -2931,25 +3285,33 @@
     }
   });
 
-  setInterval(() => {
+  const pingPoller = new AdaptivePoller(() => {
     const now = performance.now();
     for (const session of sessions.values()) pingSession(session, now);
-  }, 500);
-  setInterval(() => void refreshSessionInventory(), 4000);
+  }, () => document.hidden ? 2000 : 500);
+  pingPoller.start(500);
+
+  const inventoryPoller = new AdaptivePoller(async () => {
+    if (!document.hidden) await refreshSessionInventory();
+  }, () => document.hidden
+    ? 30000
+    : activeSettingsTab === 'sessions' && settingsDialog.open ? 4000 : 15000);
+  inventoryPoller.start(4000);
+  const auditPoller = new AdaptivePoller(async () => {
+    if (!document.hidden && activeSettingsTab === 'audit'
+        && settingsDialog.open && auditAutoRefresh.checked) await refreshAuditLog();
+  }, () => 10000);
+  auditPoller.start(10000);
 
   systemThemeQuery.addEventListener?.('change', event => {
     if (followsSystemTheme) applyTheme(event.matches ? 'light' : 'dark', false);
   });
 
   applyTheme(currentTheme, false);
+  void globalThis.LumenTerminalState.purgeOlderThan(Date.now() - 24 * 60 * 60 * 1000);
   const restored = loadState();
   restored.tabs.forEach(tab => createSession(tab, false));
-  if (restored.split) {
-    splitPrimaryId = restored.split.primaryId;
-    splitId = restored.split.secondaryId;
-    splitDirection = restored.split.direction;
-    splitRatio = restored.split.ratio;
-  }
+  if (restored.split) splitLayout.restore(restored.split, new Set(sessions.keys()));
   activateSession(restored.activeId);
   void refreshSessionInventory();
   void syncPreferences();

@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const fs = require('node:fs');
+const context = { globalThis: {} };
+vm.runInNewContext(fs.readFileSync('web/audit-log.js', 'utf8'), context);
+const audit = context.globalThis.LumenAuditLog;
+const rows = [{ timestamp: '2026-01-01T00:00:00Z', event: 'login_failed', client: '1.2.3.4', detail: 'credentials' }];
+assert.equal(audit.filter(rows, { category: 'danger', now: Date.parse('2026-01-01T00:10:00Z') }).length, 1);
+assert.match(audit.serialize(rows, 'csv'), /login_failed/);
+console.log('audit filtering and export checks passed');

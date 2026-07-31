@@ -31,6 +31,13 @@ def main() -> None:
         "/*__SERIALIZE_JS__*/": inline_script(WEB / "vendor" / "addon-serialize.js"),
         "/*__SELECTION_JS__*/": inline_script(WEB / "selection.js"),
         "/*__SESSION_MANAGER_JS__*/": inline_script(WEB / "session-manager.js"),
+        "/*__RUNTIME_JS__*/": inline_script(WEB / "runtime.js"),
+        "/*__SPLIT_LAYOUT_JS__*/": inline_script(WEB / "split-layout.js"),
+        "/*__AUDIT_LOG_JS__*/": inline_script(WEB / "audit-log.js"),
+        "/*__COMMAND_SNIPPETS_JS__*/": inline_script(WEB / "command-snippets.js"),
+        "/*__TERMINAL_CONNECTION_JS__*/": inline_script(WEB / "terminal-connection.js"),
+        "/*__CONTEXT_MENU_JS__*/": inline_script(WEB / "context-menu.js"),
+        "/*__DIAGNOSTICS_JS__*/": inline_script(WEB / "diagnostics.js"),
         "/*__TERMINAL_STATE_JS__*/": inline_script(WEB / "terminal-state.js"),
         "/*__APP_JS__*/": inline_script(WEB / "app.js"),
     }

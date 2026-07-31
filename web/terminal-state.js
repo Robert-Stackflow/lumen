@@ -29,6 +29,38 @@
     load: id => transact('readonly', store => store.get(id)),
     save: (id, snapshot) => transact('readwrite', store => store.put(snapshot, id)),
     remove: id => transact('readwrite', store => store.delete(id)),
+    clear: async () => {
+      const db = await database();
+      try {
+        await new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE, 'readwrite');
+          const request = transaction.objectStore(STORE).clear();
+          request.onsuccess = () => resolve();
+          request.onerror = () => reject(request.error);
+        });
+      } finally {
+        db.close();
+      }
+    },
+    purgeOlderThan: async cutoff => {
+      const db = await database();
+      try {
+        await new Promise((resolve, reject) => {
+          const transaction = db.transaction(STORE, 'readwrite');
+          const request = transaction.objectStore(STORE).openCursor();
+          request.onsuccess = () => {
+            const cursor = request.result;
+            if (!cursor) return;
+            if (!cursor.value?.savedAt || cursor.value.savedAt < cutoff) cursor.delete();
+            cursor.continue();
+          };
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+        });
+      } finally {
+        db.close();
+      }
+    },
   };
   root.LumenTerminalState = api;
 }(globalThis));

@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <json-c/json.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -202,6 +203,8 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
   auth->max_connections_per_ip = 4;
   auth->ws_max_attempts = 20;
   auth->ws_rate_window = 60;
+  auth->audit_max_bytes = 2 * 1024 * 1024;
+  auth->audit_retention_files = 5;
 
   bool have_password = false;
   bool have_secret = false;
@@ -329,6 +332,18 @@ int lumen_auth_load(const char *path, struct lumen_auth **result, char *error, s
         goto fail;
       }
       snprintf(auth->audit_log, sizeof(auth->audit_log), "%s", value);
+    } else if (!strcmp(key, "audit_max_bytes")) {
+      if (!parse_i64(value, 65536, 104857600, &auth->audit_max_bytes)) {
+        snprintf(error, error_len, "invalid audit_max_bytes on line %d", line_number);
+        goto fail;
+      }
+    } else if (!strcmp(key, "audit_retention_files")) {
+      int64_t parsed = 0;
+      if (!parse_i64(value, 1, 20, &parsed)) {
+        snprintf(error, error_len, "invalid audit_retention_files on line %d", line_number);
+        goto fail;
+      }
+      auth->audit_retention_files = (int)parsed;
     } else if (!strcmp(key, "passkey_store")) {
       if (*value != '/' || strlen(value) >= sizeof(auth->passkey_store)) {
         snprintf(error, error_len, "invalid passkey_store on line %d", line_number);
@@ -577,8 +592,24 @@ static void save_rates(struct lumen_auth *auth) {
   else unlink(temporary);
 }
 
+static void rotate_audit_log(struct lumen_auth *auth) {
+  struct stat st;
+  if (stat(auth->audit_log, &st) != 0 || st.st_size < auth->audit_max_bytes) return;
+  char source[640], target[640];
+  snprintf(target, sizeof(target), "%s.%d", auth->audit_log, auth->audit_retention_files);
+  unlink(target);
+  for (int index = auth->audit_retention_files - 1; index >= 1; index--) {
+    snprintf(source, sizeof(source), "%s.%d", auth->audit_log, index);
+    snprintf(target, sizeof(target), "%s.%d", auth->audit_log, index + 1);
+    rename(source, target);
+  }
+  snprintf(target, sizeof(target), "%s.1", auth->audit_log);
+  rename(auth->audit_log, target);
+}
+
 void lumen_auth_audit(struct lumen_auth *auth, const char *event, const char *client, const char *detail) {
   if (!auth || !auth->audit_log[0]) return;
+  rotate_audit_log(auth);
   FILE *file = fopen(auth->audit_log, "a");
   if (!file) return;
   chmod(auth->audit_log, 0600);
@@ -590,6 +621,81 @@ void lumen_auth_audit(struct lumen_auth *auth, const char *event, const char *cl
   fprintf(file, "%s event=%s client=%s detail=%s\n", formatted, event ? event : "-", client ? client : "-",
           detail ? detail : "-");
   fclose(file);
+}
+
+char *lumen_auth_audit_list(struct lumen_auth *auth, size_t limit) {
+  if (!auth || !auth->audit_log[0]) return strdup("[]");
+  if (limit == 0 || limit > 500) limit = 200;
+  FILE *file = fopen(auth->audit_log, "r");
+  if (!file) return errno == ENOENT ? strdup("[]") : NULL;
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  long size = ftell(file);
+  long start = size > 262144 ? size - 262144 : 0;
+  if (fseek(file, start, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  if (start > 0) {
+    char discarded[1024];
+    if (!fgets(discarded, sizeof(discarded), file) && ferror(file)) {
+      fclose(file);
+      return NULL;
+    }
+  }
+
+  char **lines = calloc(limit, sizeof(*lines));
+  if (!lines) {
+    fclose(file);
+    return NULL;
+  }
+  size_t count = 0, next = 0;
+  char line[1024];
+  while (fgets(line, sizeof(line), file)) {
+    free(lines[next]);
+    lines[next] = strdup(line);
+    if (!lines[next]) break;
+    next = (next + 1) % limit;
+    if (count < limit) count++;
+  }
+  fclose(file);
+
+  json_object *array = json_object_new_array();
+  if (!array) goto fail;
+  for (size_t offset = 0; offset < count; offset++) {
+    size_t index = (next + limit - 1 - offset) % limit;
+    char *entry = lines[index];
+    if (!entry) continue;
+    char *event = strstr(entry, " event=");
+    char *client = event ? strstr(event + 1, " client=") : NULL;
+    char *detail = client ? strstr(client + 1, " detail=") : NULL;
+    if (!event || !client || !detail) continue;
+    *event = '\0';
+    *client = '\0';
+    *detail = '\0';
+    char *newline = strchr(detail + 8, '\n');
+    if (newline) *newline = '\0';
+    json_object *item = json_object_new_object();
+    if (!item) continue;
+    json_object_object_add(item, "timestamp", json_object_new_string(entry));
+    json_object_object_add(item, "event", json_object_new_string(event + 7));
+    json_object_object_add(item, "client", json_object_new_string(client + 8));
+    json_object_object_add(item, "detail", json_object_new_string(detail + 8));
+    json_object_array_add(array, item);
+  }
+  const char *serialized = json_object_to_json_string_ext(array, JSON_C_TO_STRING_PLAIN);
+  char *result = strdup(serialized);
+  json_object_put(array);
+  for (size_t i = 0; i < limit; i++) free(lines[i]);
+  free(lines);
+  return result;
+
+fail:
+  for (size_t i = 0; i < limit; i++) free(lines[i]);
+  free(lines);
+  return NULL;
 }
 
 static struct lumen_ws_rate *ws_rate_entry(struct lumen_auth *auth, const char *client, int64_t now) {

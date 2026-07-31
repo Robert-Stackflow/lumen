@@ -7,7 +7,8 @@
     "type": "object",
     "required": [
       "id", "pid", "clients", "historyBytes", "historyTruncated",
-      "rows", "columns", "createdAt", "connections"
+      "rows", "columns", "createdAt", "foregroundPid", "foregroundCommand",
+      "workingDirectory", "memoryKb", "cpuPercent", "lastActivityAt", "connections"
     ],
     "additionalProperties": false,
     "properties": {
@@ -19,11 +20,20 @@
       "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
       "columns": { "type": "integer", "minimum": 0, "maximum": 65535 },
       "createdAt": { "type": "integer", "minimum": 0 },
+      "foregroundPid": { "type": "integer" },
+      "foregroundCommand": { "type": "string", "maxLength": 127 },
+      "workingDirectory": { "type": "string", "maxLength": 511 },
+      "memoryKb": { "type": "integer", "minimum": 0 },
+      "cpuPercent": { "type": "number", "minimum": 0 },
+      "lastActivityAt": { "type": "integer", "minimum": 0 },
       "connections": {
         "type": "array",
         "items": {
           "type": "object",
-          "required": ["id", "connectedAt", "ip", "rows", "columns", "browserKey"],
+          "required": [
+            "id", "connectedAt", "ip", "rows", "columns", "browserKey",
+            "readOnly", "sizeOwner"
+          ],
           "additionalProperties": false,
           "properties": {
             "id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
@@ -34,7 +44,9 @@
             "browserKey": {
               "type": "string",
               "pattern": "^$|^[0-9a-fA-F-]{36}$"
-            }
+            },
+            "readOnly": { "type": "boolean" },
+            "sizeOwner": { "type": "boolean" }
           }
         }
       }

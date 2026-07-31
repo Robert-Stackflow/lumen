@@ -90,7 +90,11 @@ struct session {
     size_t input_length;
     int64_t terminate_deadline_ms;
     int64_t last_activity_ms;
+    time_t last_activity_at;
     time_t created_at;
+    unsigned long long last_cpu_ticks;
+    int64_t last_cpu_sample_ms;
+    double cpu_percent;
     bool restored_from_tmux;
     struct client *size_owner;
 };
@@ -633,6 +637,75 @@ static unsigned int attached_client_count(const struct client *clients,
     return count;
 }
 
+static void json_safe_text(char *value) {
+    for (char *cursor = value; *cursor; cursor++) {
+        if ((unsigned char)*cursor < 0x20 || *cursor == '"' || *cursor == '\\') *cursor = '?';
+    }
+}
+
+static void session_process_info(const struct session *session, pid_t *pid,
+                                 char *command, size_t command_size,
+                                 char *cwd, size_t cwd_size,
+                                 unsigned long *memory_kb,
+                                 unsigned long long *cpu_ticks) {
+    *pid = session && session->master_fd >= 0 ? tcgetpgrp(session->master_fd) : -1;
+    if (*pid <= 0 && session) *pid = session->pid;
+    command[0] = cwd[0] = '\0';
+    *memory_kb = 0;
+    *cpu_ticks = 0;
+    if (*pid <= 0) return;
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%ld/cwd", (long)*pid);
+    ssize_t cwd_length = readlink(path, cwd, cwd_size - 1);
+    if (cwd_length > 0) cwd[cwd_length] = '\0';
+
+    snprintf(path, sizeof(path), "/proc/%ld/comm", (long)*pid);
+    FILE *file = fopen(path, "r");
+    if (file) {
+        if (fgets(command, (int)command_size, file)) {
+            command[strcspn(command, "\r\n")] = '\0';
+        }
+        fclose(file);
+    }
+
+    snprintf(path, sizeof(path), "/proc/%ld/statm", (long)*pid);
+    file = fopen(path, "r");
+    unsigned long pages = 0, resident = 0;
+    if (file) {
+        if (fscanf(file, "%lu %lu", &pages, &resident) == 2)
+            *memory_kb = resident * (unsigned long)sysconf(_SC_PAGESIZE) / 1024;
+        fclose(file);
+    }
+
+    snprintf(path, sizeof(path), "/proc/%ld/stat", (long)*pid);
+    file = fopen(path, "r");
+    if (file) {
+        char stat_line[2048];
+        if (fgets(stat_line, sizeof(stat_line), file)) {
+            char *fields = strrchr(stat_line, ')');
+            if (fields && fields[1] == ' ') {
+                fields += 2;
+                char *save = NULL;
+                unsigned int field = 3;
+                unsigned long long user = 0, system = 0;
+                for (char *token = strtok_r(fields, " ", &save); token;
+                     token = strtok_r(NULL, " ", &save), field++) {
+                    if (field == 14) user = strtoull(token, NULL, 10);
+                    if (field == 15) {
+                        system = strtoull(token, NULL, 10);
+                        break;
+                    }
+                }
+                *cpu_ticks = user + system;
+            }
+        }
+        fclose(file);
+    }
+    json_safe_text(command);
+    json_safe_text(cwd);
+}
+
 static struct session *find_session(struct session *sessions, const char *id) {
     for (struct session *session = sessions; session; session = session->next) {
         if (strcmp(session->id, id) == 0) {
@@ -717,6 +790,7 @@ static int spawn_shell(struct session *session, const struct server_config *conf
     session->columns = size.ws_col;
     session->terminate_deadline_ms = 0;
     session->last_activity_ms = monotonic_milliseconds();
+    session->last_activity_at = time(NULL);
     session->history_start = 0;
     session->history_length = 0;
     session->history_truncated = false;
@@ -779,7 +853,7 @@ static void release_session_size(struct client *client, struct client *clients) 
     }
     client->session->size_owner = NULL;
     for (struct client *candidate = clients; candidate; candidate = candidate->next) {
-        if (candidate != client && candidate->fd >= 0 &&
+        if (candidate != client && candidate->fd >= 0 && !candidate->read_only &&
             candidate->session == client->session && !candidate->close_after_flush) {
             claim_session_size(candidate);
             break;
@@ -872,6 +946,12 @@ static bool terminal_handshake_response(const unsigned char *data, size_t length
     return found;
 }
 
+static bool size_claim_request(const unsigned char *data, size_t length) {
+    static const unsigned char request[] = "\x1b]777;lumen-claim-size\x07";
+    return length == sizeof(request) - 1 &&
+           memcmp(data, request, sizeof(request) - 1) == 0;
+}
+
 static bool flush_session_input(struct session *session) {
     while (session->input_length) {
         ssize_t written = write(session->master_fd, session->input, session->input_length);
@@ -920,9 +1000,10 @@ static bool replay_session(struct client *client, const struct session *session,
     return true;
 }
 
-static void queue_session_output(struct client *clients, const struct session *session,
+static void queue_session_output(struct client *clients, struct session *session,
                                  size_t queue_limit, const unsigned char *data,
                                  size_t length) {
+    session->last_activity_at = time(NULL);
     for (struct client *client = clients; client; client = client->next) {
         if (client->session != session || client->close_after_flush) {
             continue;
@@ -1152,9 +1233,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         client->session = session;
         session->last_activity_ms = monotonic_milliseconds();
+        session->last_activity_at = time(NULL);
         client->rows = header.rows;
         client->columns = header.columns;
-        if (!session->size_owner) {
+        if (!session->size_owner && !client->read_only) {
             session->size_owner = client;
         }
         if (!client->skip_replay && !replay_session(client, session, queue_limit)) {
@@ -1198,8 +1280,16 @@ static bool handle_client_message(struct client *client, struct session **sessio
         if (!client->session || !header.length) {
             return client->session != NULL;
         }
+        if (size_claim_request(payload, header.length)) {
+            if (!client->read_only) {
+                claim_session_size(client);
+                redraw_session(client->session);
+            }
+            return true;
+        }
         if (client->read_only || terminal_handshake_response(payload, header.length)) return true;
         client->session->last_activity_ms = monotonic_milliseconds();
+        client->session->last_activity_at = time(NULL);
         return queue_session_input(client->session, payload, header.length);
     }
 
@@ -1209,7 +1299,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         client->rows = header.rows;
         client->columns = header.columns;
-        if (client->session->size_owner == client) {
+        if (!client->read_only && client->session->size_owner == client) {
             resize_session(client->session, client->rows, client->columns);
         }
         return true;
@@ -1250,16 +1340,42 @@ static bool handle_client_message(struct client *client, struct session **sessio
             list[used++] = '[';
         }
         for (struct session *session = *sessions; session; session = session->next) {
+            pid_t foreground_pid = -1;
+            char foreground_command[128], working_directory[512];
+            unsigned long memory_kb = 0;
+            unsigned long long cpu_ticks = 0;
+            session_process_info(session, &foreground_pid,
+                                 foreground_command, sizeof(foreground_command),
+                                 working_directory, sizeof(working_directory),
+                                 &memory_kb, &cpu_ticks);
+            int64_t cpu_sample_ms = monotonic_milliseconds();
+            if (session->last_cpu_sample_ms > 0 && cpu_ticks >= session->last_cpu_ticks) {
+                long ticks_per_second = sysconf(_SC_CLK_TCK);
+                int64_t elapsed_ms = cpu_sample_ms - session->last_cpu_sample_ms;
+                if (ticks_per_second > 0 && elapsed_ms > 0)
+                    session->cpu_percent =
+                        (double)(cpu_ticks - session->last_cpu_ticks) * 100000.0 /
+                        ((double)ticks_per_second * (double)elapsed_ms);
+            }
+            session->last_cpu_ticks = cpu_ticks;
+            session->last_cpu_sample_ms = cpu_sample_ms;
             int written = header.type == MSG_LIST_JSON
                 ? snprintf(list + used, sizeof(list) - used,
                            "%s{\"id\":\"%s\",\"pid\":%ld,\"clients\":%u,"
                            "\"historyBytes\":%zu,\"historyTruncated\":%s,"
-                           "\"rows\":%u,\"columns\":%u,\"createdAt\":%lld,\"connections\":[",
+                           "\"rows\":%u,\"columns\":%u,\"createdAt\":%lld,"
+                           "\"foregroundPid\":%ld,\"foregroundCommand\":\"%s\","
+                           "\"workingDirectory\":\"%s\",\"memoryKb\":%lu,\"cpuPercent\":%.1f,"
+                           "\"lastActivityAt\":%lld,"
+                           "\"connections\":[",
                            used > 1 ? "," : "", session->id, (long) session->pid,
                            attached_client_count(clients, session),
                            session->history_length,
                            session->history_truncated ? "true" : "false",
-                           session->rows, session->columns, (long long)session->created_at)
+                           session->rows, session->columns, (long long)session->created_at,
+                           (long)foreground_pid, foreground_command, working_directory,
+                           memory_kb, session->cpu_percent,
+                           (long long)session->last_activity_at)
                 : snprintf(list + used, sizeof(list) - used,
                            "%-32s pid=%-7ld clients=%u history=%zu%s\n",
                            session->id, (long) session->pid,
@@ -1277,12 +1393,14 @@ static bool handle_client_message(struct client *client, struct session **sessio
                     written = snprintf(list + used, sizeof(list) - used,
                                        "%s{\"id\":\"%llu\",\"connectedAt\":%lld,"
                                        "\"ip\":\"%s\",\"rows\":%u,\"columns\":%u,"
-                                       "\"browserKey\":\"%s\"}",
+                                       "\"browserKey\":\"%s\",\"readOnly\":%s,\"sizeOwner\":%s}",
                                        first ? "" : ",",
                                        (unsigned long long)attached->id,
                                        (long long)attached->connected_at, attached->address,
                                        attached->rows, attached->columns,
-                                       attached->browser_key);
+                                       attached->browser_key,
+                                       attached->read_only ? "true" : "false",
+                                       session->size_owner == attached ? "true" : "false");
                     if (written < 0 || (size_t)written >= sizeof(list) - used) break;
                     used += (size_t)written;
                     first = false;
@@ -1378,8 +1496,10 @@ static void discover_tmux_sessions(struct session **sessions,
         session->master_fd = -1;
         session->history_capacity = config->history_bytes;
         session->created_at = (time_t)created;
+        session->last_activity_at = session->created_at;
         session->restored_from_tmux = true;
         session->last_activity_ms = monotonic_milliseconds();
+        session->last_activity_at = time(NULL);
         session->next = *sessions;
         *sessions = session;
         fprintf(stderr, "lumen-pty: discovered persistent tmux session %s\n", id);
@@ -1502,6 +1622,7 @@ static int serve(const struct server_config *config) {
                         ssize_t received = read(session->master_fd, output, sizeof(output));
                         if (received > 0) {
                             session->last_activity_ms = monotonic_milliseconds();
+                            session->last_activity_at = time(NULL);
                             append_history(session, output, (size_t) received);
                             queue_session_output(clients, session, queue_limit,
                                                  output, (size_t) received);
