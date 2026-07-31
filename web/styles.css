@@ -2023,10 +2023,42 @@ a:focus-visible {
 
 .session-manager-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 142px 148px;
+  grid-template-columns: minmax(180px, 1fr) 128px 132px 142px;
   width: 100%;
   gap: 9px;
   margin-bottom: 12px;
+}
+
+.session-bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+}
+
+.session-bulk-actions span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.session-bulk-actions button {
+  min-height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.session-bulk-actions button.danger {
+  color: var(--red);
+}
+
+.session-bulk-actions button:disabled {
+  opacity: .42;
+  cursor: default;
 }
 
 .idle-cleanup-preview,
@@ -2513,13 +2545,83 @@ a:focus-visible {
 
 .session-manager-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: start;
   gap: 16px;
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: color-mix(in srgb, var(--chrome-raised) 94%, var(--surface));
+}
+
+.session-selection {
+  position: relative;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  place-items: center;
+  cursor: pointer;
+}
+
+.session-selection input {
+  position: absolute;
+  opacity: 0;
+}
+
+.session-selection i {
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+}
+
+.session-selection input:checked + i {
+  border-color: var(--blue);
+  background: var(--blue);
+  box-shadow: inset 0 0 0 3px var(--surface);
+}
+
+.service-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.service-health-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 72px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+}
+
+.service-health-card > span:nth-child(2) {
+  display: grid;
+  gap: 5px;
+}
+
+.service-health-card small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.service-health-card b {
+  color: var(--green);
+  font-size: 10px;
+}
+
+.health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 10%, transparent);
 }
 
 .session-manager-body,
@@ -2732,11 +2834,25 @@ a:focus-visible {
   }
 
   .session-manager-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: 20px minmax(0, 1fr);
   }
 
   .session-manager-actions {
+    grid-column: 2;
     justify-content: flex-end;
+    overflow-x: auto;
+  }
+
+  .session-bulk-actions {
+    flex-wrap: wrap;
+  }
+
+  .session-bulk-actions span {
+    flex-basis: calc(100% - 90px);
+  }
+
+  .service-health-grid {
+    grid-template-columns: 1fr;
   }
 
   .session-connection-row small {

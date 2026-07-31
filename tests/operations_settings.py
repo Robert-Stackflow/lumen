@@ -17,6 +17,11 @@ assert 'id="diagnostics-source-filter"' in page
 assert 'id="copy-diagnostics"' in page
 assert 'id="export-diagnostics"' in page
 assert "LumenDiagnostics.serialize" in app
+assert 'data-settings-tab="health"' in page
+assert 'id="session-status-filter"' in page
+assert 'id="protect-selected-sessions"' in page
+assert 'id="terminate-selected-sessions"' in page
+assert "refreshServiceHealth" in app
 assert "setSessionProtected" in app
 assert "terminate-force" in app
 assert "!item.protected" in app

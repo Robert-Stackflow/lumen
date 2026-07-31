@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/statvfs.h>
+#include <sys/sysinfo.h>
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -751,13 +753,58 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         for (char *cursor = inventory; (cursor = strstr(cursor, "\"clients\":")); cursor += 10)
           connections += (unsigned int)strtoul(cursor + 10, NULL, 10);
         free(inventory);
-        char *body = malloc(256);
+        struct sysinfo system_info = {0};
+        struct statvfs disk_info = {0};
+        sysinfo(&system_info);
+        statvfs("/", &disk_info);
+        unsigned long web_pages = 0, web_resident = 0;
+        FILE *statm = fopen("/proc/self/statm", "r");
+        if (statm) {
+          if (fscanf(statm, "%lu %lu", &web_pages, &web_resident) != 2)
+            web_resident = 0;
+          fclose(statm);
+        }
+        unsigned long long memory_total =
+            (unsigned long long)system_info.totalram * system_info.mem_unit;
+        unsigned long long memory_available =
+            (unsigned long long)system_info.freeram * system_info.mem_unit;
+        FILE *meminfo = fopen("/proc/meminfo", "r");
+        if (meminfo) {
+          char key[64], unit[16];
+          unsigned long long value = 0;
+          while (fscanf(meminfo, "%63s %llu %15s", key, &value, unit) == 3) {
+            if (!strcmp(key, "MemAvailable:")) {
+              memory_available = value * 1024;
+              break;
+            }
+          }
+          fclose(meminfo);
+        }
+        unsigned long long disk_total =
+            (unsigned long long)disk_info.f_blocks * disk_info.f_frsize;
+        unsigned long long disk_available =
+            (unsigned long long)disk_info.f_bavail * disk_info.f_frsize;
+        unsigned long web_memory_kb =
+            web_resident * (unsigned long)sysconf(_SC_PAGESIZE) / 1024;
+        char *body = malloc(768);
         if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
-        int written = snprintf(body, 256,
-                               "{\"status\":\"ok\",\"version\":\"%s\",\"uptimeSeconds\":%lld,"
-                               "\"sessions\":%u,\"connections\":%u}",
+        int written = snprintf(body, 768,
+                               "{\"status\":\"ok\",\"version\":\"%s\","
+                               "\"web\":{\"status\":\"ok\",\"uptimeSeconds\":%lld,\"memoryKb\":%lu},"
+                               "\"pty\":{\"status\":\"ok\",\"sessions\":%u},"
+                               "\"websocket\":{\"status\":\"ok\",\"connections\":%u},"
+                               "\"tmux\":{\"status\":\"%s\",\"sessions\":%u},"
+                               "\"memory\":{\"usedBytes\":%llu,\"totalBytes\":%llu},"
+                               "\"disk\":{\"usedBytes\":%llu,\"totalBytes\":%llu}}",
                                TTYD_VERSION, (long long)(time(NULL) - http_started_at),
-                               sessions, connections);
+                               web_memory_kb, sessions, connections,
+                               sessions ? "ok" : "idle", sessions,
+                               memory_total - memory_available, memory_total,
+                               disk_total - disk_available, disk_total);
+        if (written < 0 || written >= 768) {
+          free(body);
+          return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
+        }
         return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                          body, (size_t)written, true, NULL, 0);
       }

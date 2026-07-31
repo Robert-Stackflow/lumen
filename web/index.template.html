@@ -131,6 +131,7 @@
           <button type="button" data-settings-tab="security" aria-selected="false">安全</button>
           <button type="button" data-settings-tab="audit" aria-selected="false">审计日志</button>
           <button type="button" data-settings-tab="diagnostics" aria-selected="false">错误诊断</button>
+          <button type="button" data-settings-tab="health" aria-selected="false">服务健康</button>
         </nav>
 
         <div class="settings-content">
@@ -256,6 +257,17 @@
             </header>
             <div class="session-manager-toolbar">
               <input id="session-manager-search" type="search" placeholder="搜索名称、备注或会话 ID">
+              <div id="session-status-filter" class="custom-select" data-value="all">
+                <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                  <span>全部状态</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                </button>
+                <div class="custom-select-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="all">全部状态</button>
+                  <button type="button" role="option" data-value="connected">已连接</button>
+                  <button type="button" role="option" data-value="idle">空闲</button>
+                  <button type="button" role="option" data-value="protected">受保护</button>
+                </div>
+              </div>
               <div id="session-manager-sort" class="custom-select" data-value="created-desc">
                 <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
                   <span>最近创建</span>
@@ -282,6 +294,13 @@
               </div>
             </div>
             <div id="idle-cleanup-preview" class="idle-cleanup-preview" aria-live="polite"></div>
+            <div class="session-bulk-actions">
+              <button id="select-visible-sessions" type="button">全选当前</button>
+              <span id="session-selection-count">未选择会话</span>
+              <button id="protect-selected-sessions" type="button" disabled>保护</button>
+              <button id="unprotect-selected-sessions" type="button" disabled>取消保护</button>
+              <button id="terminate-selected-sessions" class="danger" type="button" disabled>结束空闲会话</button>
+            </div>
             <div id="session-manager-list" class="session-manager-list">
               <div class="session-manager-loading">正在读取会话…</div>
             </div>
@@ -315,6 +334,16 @@
             </div>
             <div id="diagnostics-list" class="diagnostics-list">
               <div class="session-manager-loading">暂无异常</div>
+            </div>
+          </section>
+
+          <section class="settings-panel" data-settings-panel="health" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>服务健康</h3><p>PTY、WebSocket、tmux 和主机资源状态</p></span>
+              <button id="refresh-service-health" type="button">刷新</button>
+            </header>
+            <div id="service-health-grid" class="service-health-grid">
+              <div class="session-manager-loading">正在读取服务状态…</div>
             </div>
           </section>
 

@@ -185,6 +185,9 @@
   const auditRetentionPolicy = document.getElementById('audit-retention-policy');
   const sessionManagerSearch = document.getElementById('session-manager-search');
   const sessionManagerSort = document.getElementById('session-manager-sort');
+  const sessionStatusFilter = document.getElementById('session-status-filter');
+  const sessionSelectionCount = document.getElementById('session-selection-count');
+  const serviceHealthGrid = document.getElementById('service-health-grid');
   const commandSnippetList = document.getElementById('command-snippet-list');
   const commandSnippetEditor = document.getElementById('command-snippet-editor');
   const commandSnippetName = document.getElementById('command-snippet-name');
@@ -242,6 +245,9 @@
   let auditTimeRange = 'all';
   let diagnosticsSource = 'all';
   let sessionSort = 'created-desc';
+  let sessionStatus = 'all';
+  const selectedSessionIds = new Set();
+  let pendingCleanupCandidates = null;
   const sessionNoteSaveTimers = new Map();
   const defaultFontSize = window.matchMedia('(max-width: 560px)').matches ? 13 : 14;
   let settings = loadSettings();
@@ -1586,7 +1592,7 @@
     showToast(session.pinned ? '标签已固定' : '已取消固定');
   }
 
-  async function setSessionProtected(id, protectedSession) {
+  async function setSessionProtected(id, protectedSession, quiet = false) {
     try {
       const response = await fetch(`${basePath}/api/sessions/${encodeURIComponent(id)}`, {
         method: 'POST',
@@ -1596,7 +1602,7 @@
       });
       if (response.status === 404) {
         await refreshSessionInventory();
-        showToast('该会话已经结束，列表已刷新');
+        if (!quiet) showToast('该会话已经结束，列表已刷新');
         return;
       }
       if (!response.ok) throw new Error(`protection endpoint returned ${response.status}`);
@@ -1607,7 +1613,7 @@
         session.tab.querySelector('.tab-protection').hidden = !protectedSession;
       }
       await refreshSessionInventory();
-      showToast(protectedSession ? '会话已保护，不会参与空闲清理' : '已取消会话保护');
+      if (!quiet) showToast(protectedSession ? '会话已保护，不会参与空闲清理' : '已取消会话保护');
     } catch (error) {
       globalThis.LumenDiagnostics.report('会话保护', error);
       showToast('无法更新会话保护状态');
@@ -2107,13 +2113,19 @@
     sessionManagerList.replaceChildren();
     if (!sessionInventory.length) {
       sessionManagerList.innerHTML = '<div class="session-manager-loading">当前没有后台会话</div>';
+      updateSessionBulkActions();
       return;
     }
     const query = sessionManagerSearch.value.trim().toLocaleLowerCase();
     const visibleItems = sessionInventory.filter(item => {
       const session = sessions.get(item.id);
-      return `${session?.name || ''} ${item.id} ${settings.sessionNotes[item.id] || ''}`
+      const matchesQuery = `${session?.name || ''} ${item.id} ${settings.sessionNotes[item.id] || ''}`
         .toLocaleLowerCase().includes(query);
+      const matchesStatus = sessionStatus === 'all'
+        || sessionStatus === 'connected' && Number(item.clients) > 0
+        || sessionStatus === 'idle' && Number(item.clients) === 0
+        || sessionStatus === 'protected' && item.protected;
+      return matchesQuery && matchesStatus;
     }).sort((left, right) => {
       if (sessionSort === 'created-asc') return Number(left.createdAt) - Number(right.createdAt);
       if (sessionSort === 'name') {
@@ -2125,14 +2137,26 @@
     });
     if (!visibleItems.length) {
       sessionManagerList.innerHTML = '<div class="session-manager-loading">没有匹配的会话</div>';
+      updateSessionBulkActions();
       return;
     }
     for (const item of visibleItems) {
       const session = sessions.get(item.id);
       const row = document.createElement('div');
       row.className = 'session-manager-row';
+      row.dataset.sessionId = item.id;
       const body = document.createElement('div');
       body.className = 'session-manager-body';
+      const selection = document.createElement('label');
+      selection.className = 'session-selection';
+      selection.innerHTML = '<input type="checkbox"><i aria-hidden="true"></i>';
+      const selectionInput = selection.querySelector('input');
+      selectionInput.checked = selectedSessionIds.has(item.id);
+      selectionInput.addEventListener('change', () => {
+        if (selectionInput.checked) selectedSessionIds.add(item.id);
+        else selectedSessionIds.delete(item.id);
+        updateSessionBulkActions();
+      });
       const copy = document.createElement('span');
       copy.className = 'session-manager-summary';
       copy.innerHTML = '<strong></strong><small></small><small class="session-runtime"></small>';
@@ -2275,9 +2299,28 @@
         connections.append(detail);
       }
       body.append(copy, note, connections);
-      row.append(body, actions);
+      row.append(selection, body, actions);
       sessionManagerList.append(row);
     }
+    updateSessionBulkActions();
+  }
+
+  function updateSessionBulkActions() {
+    for (const id of [...selectedSessionIds]) {
+      if (!sessionInventory.some(item => item.id === id)) selectedSessionIds.delete(id);
+    }
+    const selected = sessionInventory.filter(item => selectedSessionIds.has(item.id));
+    sessionSelectionCount.textContent = selected.length ? `已选择 ${selected.length} 个会话` : '未选择会话';
+    document.getElementById('protect-selected-sessions').disabled = !selected.length;
+    document.getElementById('unprotect-selected-sessions').disabled = !selected.length;
+    document.getElementById('terminate-selected-sessions').disabled =
+      !selected.some(item => Number(item.clients) === 0 && !item.protected);
+  }
+
+  async function setSelectedSessionsProtected(protectedSession) {
+    const ids = [...selectedSessionIds];
+    for (const id of ids) await setSessionProtected(id, protectedSession, true);
+    showToast(`已${protectedSession ? '保护' : '取消保护'} ${ids.length} 个会话`);
   }
 
   async function disconnectManagedConnection() {
@@ -2350,8 +2393,8 @@
       : `当前没有零连接会话超过 ${idleThresholdLabel()}${protectedCount ? `；已排除 ${protectedCount} 个受保护会话` : ''}`;
   }
 
-  function openIdleCleanup() {
-    const candidates = idleSessionCandidates();
+  function openIdleCleanup(candidatesOverride = null) {
+    const candidates = candidatesOverride || idleSessionCandidates();
     if (!candidates.length) {
       showToast(`没有超过 ${idleThresholdLabel()}且无人连接的空闲会话`);
       return;
@@ -2371,11 +2414,12 @@
       row.querySelector('small').textContent = `${item.id} · 已空闲 ${minutes} 分钟`;
       return row;
     }));
+    pendingCleanupCandidates = candidates;
     idleCleanupDialog.showModal();
   }
 
   async function cleanupIdleSessions() {
-    const candidates = idleSessionCandidates();
+    const candidates = pendingCleanupCandidates || idleSessionCandidates();
     idleCleanupConfirm.disabled = true;
     try {
       for (const item of candidates) {
@@ -2386,6 +2430,8 @@
         if (!response.ok && response.status !== 404) throw new Error(`terminate ${item.id}: ${response.status}`);
       }
       idleCleanupDialog.close();
+      pendingCleanupCandidates = null;
+      for (const item of candidates) selectedSessionIds.delete(item.id);
       showToast(`已清理 ${candidates.length} 个空闲会话`);
       await refreshSessionInventory();
     } catch (error) {
@@ -2432,6 +2478,44 @@
     link.download = `lumen-diagnostics-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  }
+
+  function formatResourceBytes(value) {
+    const bytes = Number(value || 0);
+    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+    return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  }
+
+  async function refreshServiceHealth() {
+    serviceHealthGrid.innerHTML = '<div class="session-manager-loading">正在读取服务状态…</div>';
+    try {
+      const response = await fetch(`${basePath}/api/health`, {
+        credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) throw new Error(`health returned ${response.status}`);
+      const health = await response.json();
+      const cards = [
+        ['Web', health.web?.status, `运行 ${formatDuration(Number(health.web?.uptimeSeconds || 0) * 1000)} · 内存 ${(Number(health.web?.memoryKb || 0) / 1024).toFixed(1)} MiB`],
+        ['PTY', health.pty?.status, `${Number(health.pty?.sessions || 0)} 个会话`],
+        ['WebSocket', health.websocket?.status, `${Number(health.websocket?.connections || 0)} 个活动连接`],
+        ['tmux', health.tmux?.status, `${Number(health.tmux?.sessions || 0)} 个持久会话`],
+        ['主机内存', 'ok', `${formatResourceBytes(health.memory?.usedBytes)} / ${formatResourceBytes(health.memory?.totalBytes)}`],
+        ['磁盘', 'ok', `${formatResourceBytes(health.disk?.usedBytes)} / ${formatResourceBytes(health.disk?.totalBytes)}`],
+      ];
+      serviceHealthGrid.replaceChildren(...cards.map(([name, status, detail]) => {
+        const card = document.createElement('article');
+        card.className = 'service-health-card';
+        card.dataset.status = status || 'unknown';
+        card.innerHTML = '<span class="health-dot"></span><span><strong></strong><small></small></span><b></b>';
+        card.querySelector('strong').textContent = name;
+        card.querySelector('small').textContent = detail;
+        card.querySelector('b').textContent = status === 'ok' ? '正常' : status === 'idle' ? '空闲' : '异常';
+        return card;
+      }));
+    } catch (error) {
+      globalThis.LumenDiagnostics.report('服务健康', error);
+      serviceHealthGrid.innerHTML = '<div class="session-manager-loading">无法读取服务状态</div>';
+    }
   }
 
   function renderAuditLog() {
@@ -2685,6 +2769,7 @@
     if (activeSettingsTab === 'snippets') renderCommandSnippets();
     if (activeSettingsTab === 'audit') void refreshAuditLog();
     if (activeSettingsTab === 'diagnostics') renderDiagnostics();
+    if (activeSettingsTab === 'health') void refreshServiceHealth();
   }
 
   function openPasskeyActionDialog(mode, item) {
@@ -3113,6 +3198,10 @@
     sessionSort = value;
     renderSessionManager();
   });
+  installCustomSelect(sessionStatusFilter, value => {
+    sessionStatus = value;
+    renderSessionManager();
+  });
   installCustomSelect(idleCleanupThreshold, value => {
     settings.idleCleanupSeconds = Number(value);
     saveSettings();
@@ -3168,8 +3257,30 @@
   });
   refreshSessionManagerButton.addEventListener('click', loadSessionManager);
   cleanupIdleSessionsButton.addEventListener('click', openIdleCleanup);
-  idleCleanupCancel.addEventListener('click', () => idleCleanupDialog.close());
+  idleCleanupCancel.addEventListener('click', () => {
+    pendingCleanupCandidates = null;
+    idleCleanupDialog.close();
+  });
   idleCleanupConfirm.addEventListener('click', () => void cleanupIdleSessions());
+  document.getElementById('select-visible-sessions').addEventListener('click', () => {
+    const visibleIds = [...sessionManagerList.querySelectorAll('[data-session-id]')]
+      .map(row => row.dataset.sessionId);
+    const allSelected = visibleIds.length && visibleIds.every(id => selectedSessionIds.has(id));
+    for (const id of visibleIds) {
+      if (allSelected) selectedSessionIds.delete(id);
+      else selectedSessionIds.add(id);
+    }
+    renderSessionManager();
+  });
+  document.getElementById('protect-selected-sessions').addEventListener('click',
+    () => void setSelectedSessionsProtected(true));
+  document.getElementById('unprotect-selected-sessions').addEventListener('click',
+    () => void setSelectedSessionsProtected(false));
+  document.getElementById('terminate-selected-sessions').addEventListener('click', () => {
+    const candidates = sessionInventory.filter(item =>
+      selectedSessionIds.has(item.id) && Number(item.clients) === 0 && !item.protected);
+    openIdleCleanup(candidates);
+  });
   document.getElementById('clear-diagnostics').addEventListener('click', () => {
     globalThis.LumenDiagnostics.clear();
     showToast('前端错误记录已清空');
@@ -3179,6 +3290,8 @@
     showToast(copied ? '诊断记录已复制' : '无法复制诊断记录');
   });
   document.getElementById('export-diagnostics').addEventListener('click', exportDiagnostics);
+  document.getElementById('refresh-service-health').addEventListener('click',
+    () => void refreshServiceHealth());
   globalThis.LumenDiagnostics.subscribe(() => {
     if (activeSettingsTab === 'diagnostics' && settingsDialog.open) renderDiagnostics();
   });

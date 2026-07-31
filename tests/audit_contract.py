@@ -24,6 +24,7 @@ def main() -> None:
     assert "limit > 500" in auth
     assert 'data-settings-tab="audit"' in page
     assert 'id="audit-retention-policy"' in page
+    assert '\\"websocket\\"' in http and '\\"usedBytes\\"' in http
     assert "credentials: 'same-origin'" in app
     print("audit log API and UI contract passed")
 

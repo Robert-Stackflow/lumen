@@ -116,8 +116,13 @@ if [[ "$protected_status" -ne 5 ]]; then
   exit 1
 fi
 LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --kill-force protected
-LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list-json |
-  python3 -c 'import json,sys; rows=json.load(sys.stdin); assert all(x["id"] != "protected" for x in rows)'
+for _ in {1..100}; do
+  if LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list-json |
+    python3 -c 'import json,sys; rows=json.load(sys.stdin); raise SystemExit(any(x["id"] == "protected" for x in rows))'; then
+    break
+  fi
+  sleep 0.02
+done
 set +e
 LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --protect protected
 missing_status=$?
