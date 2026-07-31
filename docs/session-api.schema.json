@@ -8,7 +8,7 @@
     "required": [
       "id", "pid", "clients", "historyBytes", "historyTruncated",
       "rows", "columns", "createdAt", "foregroundPid", "foregroundCommand",
-      "workingDirectory", "memoryKb", "cpuPercent", "lastActivityAt", "connections"
+      "workingDirectory", "memoryKb", "cpuPercent", "lastActivityAt", "protected", "connections"
     ],
     "additionalProperties": false,
     "properties": {
@@ -26,6 +26,7 @@
       "memoryKb": { "type": "integer", "minimum": 0 },
       "cpuPercent": { "type": "number", "minimum": 0 },
       "lastActivityAt": { "type": "integer", "minimum": 0 },
+      "protected": { "type": "boolean" },
       "connections": {
         "type": "array",
         "items": {

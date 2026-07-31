@@ -18,6 +18,8 @@ def main() -> None:
     assert "lumen_auth_audit_list(server->auth, 200)" in http
     assert '\\"retentionFiles\\"' in http
     assert '\\"maxBytes\\"' in http
+    assert '"session_protected"' in http
+    assert '"session_unprotected"' in http
     assert "size > 262144" in auth
     assert "limit > 500" in auth
     assert 'data-settings-tab="audit"' in page

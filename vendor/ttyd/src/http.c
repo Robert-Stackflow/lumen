@@ -244,11 +244,11 @@ static bool action_request_valid(struct lws *wsi, const char *expected_action) {
   return authority_len == strlen(host) && !strncasecmp(authority, host, authority_len);
 }
 
-static int terminate_session(const char *session_id) {
+static int session_control(const char *operation, const char *session_id) {
   pid_t pid = fork();
   if (pid < 0) return -1;
   if (pid == 0) {
-    execl(server->command, server->command, "--kill", session_id, (char *)NULL);
+    execl(server->command, server->command, operation, session_id, (char *)NULL);
     _exit(127);
   }
 
@@ -842,18 +842,37 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
           return auth_result == AUTH_FAIL ? 0 : 1;
         }
-        if (!action_request_valid(wsi, "terminate"))
+        char action[32] = "";
+        if (lws_hdr_custom_copy(wsi, action, sizeof(action), "x-lumen-action:", 15) <= 0)
           return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        const char *operation = NULL;
+        const char *audit_event = NULL;
+        if (!strcmp(action, "terminate") && action_request_valid(wsi, "terminate")) {
+          operation = "--kill";
+          audit_event = "session_terminated";
+        } else if (!strcmp(action, "terminate-force") && action_request_valid(wsi, "terminate-force")) {
+          operation = "--kill-force";
+          audit_event = "session_terminated";
+        } else if (!strcmp(action, "protect") && action_request_valid(wsi, "protect")) {
+          operation = "--protect";
+          audit_event = "session_protected";
+        } else if (!strcmp(action, "unprotect") && action_request_valid(wsi, "unprotect")) {
+          operation = "--unprotect";
+          audit_event = "session_unprotected";
+        } else {
+          return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
+        }
 
-        int result = terminate_session(session_id);
+        int result = session_control(operation, session_id);
         char client[64] = "";
         lumen_auth_client_key(server->auth, wsi, client, sizeof(client));
         if (result == 0) {
-          lwsl_notice("SESSION terminated %s - %s\n", session_id, client);
-          lumen_auth_audit(server->auth, "session_terminated", client, session_id);
+          lwsl_notice("SESSION action %s %s - %s\n", action, session_id, client);
+          lumen_auth_audit(server->auth, audit_event, client, session_id);
           return send_empty(wsi, 204, NULL, NULL, NULL);
         }
         if (result == 3) return send_empty(wsi, HTTP_STATUS_NOT_FOUND, NULL, NULL, NULL);
+        if (result == 5) return send_empty(wsi, HTTP_STATUS_CONFLICT, NULL, NULL, NULL);
         lwsl_err("SESSION termination failed %s - %s (status=%d)\n", session_id, client, result);
         return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
       }

@@ -7,6 +7,8 @@
     ws_connected: '终端已连接',
     ws_disconnected: '终端已断开',
     session_terminated: '终止会话',
+    session_protected: '保护会话',
+    session_unprotected: '取消保护会话',
     connection_disconnected: '断开连接',
     passkey_registered: '添加通行密钥',
     passkey_deleted: '删除通行密钥',
@@ -19,7 +21,7 @@
   const CATEGORIES = {
     auth: ['login_success', 'login_failed', 'login_locked', 'logout', 'passkey_registered',
       'passkey_deleted', 'passkey_renamed', 'totp_setup_started', 'totp_enabled', 'totp_removed'],
-    terminal: ['ws_connected', 'ws_disconnected'],
+    terminal: ['ws_connected', 'ws_disconnected', 'session_protected', 'session_unprotected'],
     danger: ['login_failed', 'login_locked', 'session_terminated', 'connection_disconnected',
       'passkey_deleted', 'totp_removed'],
     settings: ['preferences_updated'],

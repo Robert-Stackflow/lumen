@@ -18,6 +18,8 @@
     add: '<path d="M12 5v14M5 12h14"/>', settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12h2M3 12h2M12 3v2m0 14v2M17 7l1.5-1.5M5.5 18.5 7 17m10 0 1.5 1.5M5.5 5.5 7 7"/>',
     sessions: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
     close: '<path d="m7 7 10 10M17 7 7 17"/>', terminate: '<path d="M12 3v9"/><path d="M6.3 5.8a8 8 0 1 0 11.4 0"/>',
+    protect: '<path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/>',
+    unprotect: '<path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m8 8 8 8"/>',
   };
   function show(menu, event, items, onSelect) {
     menu.replaceChildren();

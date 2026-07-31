@@ -17,5 +17,11 @@ assert 'id="diagnostics-source-filter"' in page
 assert 'id="copy-diagnostics"' in page
 assert 'id="export-diagnostics"' in page
 assert "LumenDiagnostics.serialize" in app
+assert "setSessionProtected" in app
+assert "terminate-force" in app
+assert "!item.protected" in app
+assert "session_protected" in (ROOT / "web" / "audit-log.js").read_text(encoding="utf-8")
+tab_menu = app[app.index("function tabContextItems"):app.index("function terminalContextItems")]
+assert tab_menu.count("{ separator: true }") >= 4
 
 print("operations settings contract passed")

@@ -99,4 +99,32 @@ if LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list |
   exit 1
 fi
 
+{
+  printf 'sleep 30\n'
+  sleep 0.2
+} | LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" protected \
+  >/dev/null || true
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --protect protected
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list-json |
+  python3 -c 'import json,sys; rows=json.load(sys.stdin); row=next(x for x in rows if x["id"] == "protected"); assert row["protected"] is True'
+set +e
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --kill protected
+protected_status=$?
+set -e
+if [[ "$protected_status" -ne 5 ]]; then
+  echo "Protected session accepted a normal termination request." >&2
+  exit 1
+fi
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --kill-force protected
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --list-json |
+  python3 -c 'import json,sys; rows=json.load(sys.stdin); assert all(x["id"] != "protected" for x in rows)'
+set +e
+LUMEN_PTY_SOCKET="$socket_path" "$project_dir/bin/lumen-pty" --protect protected
+missing_status=$?
+set -e
+if [[ "$missing_status" -ne 3 ]]; then
+  echo "Missing protected session did not return not-found." >&2
+  exit 1
+fi
+
 echo "supervisor persistence and termination checks passed"

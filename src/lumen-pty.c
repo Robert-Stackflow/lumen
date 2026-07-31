@@ -42,6 +42,9 @@ enum message_type {
     MSG_LIST = 5,
     MSG_LIST_JSON = 6,
     MSG_DISCONNECT = 7,
+    MSG_PROTECT = 8,
+    MSG_UNPROTECT = 9,
+    MSG_KILL_FORCE = 10,
     MSG_OUTPUT = 101,
     MSG_STATUS = 102,
     MSG_EXIT = 103,
@@ -52,6 +55,7 @@ enum status_code {
     STATUS_OK = 0,
     STATUS_NOT_FOUND = 3,
     STATUS_DISCONNECTED = 4,
+    STATUS_PROTECTED = 5,
     STATUS_INVALID = 64,
     STATUS_UNAVAILABLE = 75,
 };
@@ -96,6 +100,7 @@ struct session {
     int64_t last_cpu_sample_ms;
     double cpu_percent;
     bool restored_from_tmux;
+    bool protected;
     struct client *size_owner;
 };
 
@@ -715,6 +720,17 @@ static struct session *find_session(struct session *sessions, const char *id) {
     return NULL;
 }
 
+static void remove_session_node(struct session **sessions, struct session *target) {
+    struct session **cursor = sessions;
+    while (*cursor && *cursor != target) cursor = &(*cursor)->next;
+    if (!*cursor) return;
+    *cursor = target->next;
+    if (target->master_fd >= 0) close(target->master_fd);
+    free(target->history);
+    free(target->input);
+    free(target);
+}
+
 static const char *shell_name(const char *shell) {
     const char *slash = strrchr(shell, '/');
     return slash ? slash + 1 : shell;
@@ -895,6 +911,62 @@ static int kill_tmux_session(const struct server_config *config, const char *id)
     }
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static bool tmux_session_exists(const struct server_config *config, const char *id) {
+    if (!config->tmux) return true;
+    pid_t pid = fork();
+    if (pid < 0) return true;
+    if (pid == 0) {
+        char tmux_session[LUMEN_ID_MAX + 16];
+        snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", id);
+        int null_fd = open("/dev/null", O_WRONLY);
+        if (null_fd >= 0) {
+            dup2(null_fd, STDERR_FILENO);
+            close(null_fd);
+        }
+        execl(config->tmux, config->tmux, "-L", "lumen", "has-session",
+              "-t", tmux_session, (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return true;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void prune_stale_tmux_sessions(struct session **sessions,
+                                      const struct server_config *config) {
+    struct session *session = *sessions;
+    while (session) {
+        struct session *next = session->next;
+        if (session->master_fd < 0 && !tmux_session_exists(config, session->id)) {
+            fprintf(stderr, "lumen-pty: removed stale tmux session %s\n", session->id);
+            remove_session_node(sessions, session);
+        }
+        session = next;
+    }
+}
+
+static int set_tmux_session_protected(const struct server_config *config,
+                                      const char *id, bool protected) {
+    if (!config->tmux) return 0;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        char tmux_session[LUMEN_ID_MAX + 16];
+        snprintf(tmux_session, sizeof(tmux_session), "lumen-%s", id);
+        execl(config->tmux, config->tmux, "-L", "lumen", "set-option",
+              "-t", tmux_session, "@lumen_protected",
+              protected ? "1" : "0", (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
@@ -1305,7 +1377,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
         return true;
     }
 
-    if (header.type == MSG_KILL) {
+    if (header.type == MSG_KILL || header.type == MSG_KILL_FORCE) {
         if (client->session || !valid_session_id((const char *) payload, header.length)) {
             queue_status_and_close(client, queue_limit, STATUS_INVALID);
             return true;
@@ -1317,14 +1389,46 @@ static bool handle_client_message(struct client *client, struct session **sessio
             queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
             return true;
         }
+        if (session->protected && header.type != MSG_KILL_FORCE) {
+            queue_status_and_close(client, queue_limit, STATUS_PROTECTED);
+            return true;
+        }
         if (config->tmux) {
             int result = kill_tmux_session(config, id);
+            if (session->master_fd < 0) remove_session_node(sessions, session);
             queue_status_and_close(client, queue_limit,
-                                   result == 0 ? STATUS_OK : STATUS_UNAVAILABLE);
+                                   result == 0 ? STATUS_OK : STATUS_NOT_FOUND);
             return true;
         }
         signal_session(session, SIGHUP);
         session->terminate_deadline_ms = monotonic_milliseconds() + 2000;
+        queue_status_and_close(client, queue_limit, STATUS_OK);
+        return true;
+    }
+
+    if (header.type == MSG_PROTECT || header.type == MSG_UNPROTECT) {
+        if (client->session || !valid_session_id((const char *)payload, header.length)) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        char id[LUMEN_ID_MAX + 1] = {0};
+        memcpy(id, payload, header.length);
+        struct session *session = find_session(*sessions, id);
+        if (!session) {
+            queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+            return true;
+        }
+        bool protected = header.type == MSG_PROTECT;
+        if (set_tmux_session_protected(config, id, protected) != 0) {
+            if (session->master_fd < 0 && !tmux_session_exists(config, id)) {
+                remove_session_node(sessions, session);
+                queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+                return true;
+            }
+            queue_status_and_close(client, queue_limit, STATUS_UNAVAILABLE);
+            return true;
+        }
+        session->protected = protected;
         queue_status_and_close(client, queue_limit, STATUS_OK);
         return true;
     }
@@ -1334,6 +1438,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
             queue_status_and_close(client, queue_limit, STATUS_INVALID);
             return true;
         }
+        prune_stale_tmux_sessions(sessions, config);
         char list[LUMEN_PACKET_DATA_MAX];
         size_t used = 0;
         if (header.type == MSG_LIST_JSON) {
@@ -1366,7 +1471,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            "\"rows\":%u,\"columns\":%u,\"createdAt\":%lld,"
                            "\"foregroundPid\":%ld,\"foregroundCommand\":\"%s\","
                            "\"workingDirectory\":\"%s\",\"memoryKb\":%lu,\"cpuPercent\":%.1f,"
-                           "\"lastActivityAt\":%lld,"
+                           "\"lastActivityAt\":%lld,\"protected\":%s,"
                            "\"connections\":[",
                            used > 1 ? "," : "", session->id, (long) session->pid,
                            attached_client_count(clients, session),
@@ -1375,7 +1480,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            session->rows, session->columns, (long long)session->created_at,
                            (long)foreground_pid, foreground_command, working_directory,
                            memory_kb, session->cpu_percent,
-                           (long long)session->last_activity_at)
+                           (long long)session->last_activity_at,
+                           session->protected ? "true" : "false")
                 : snprintf(list + used, sizeof(list) - used,
                            "%-32s pid=%-7ld clients=%u history=%zu%s\n",
                            session->id, (long) session->pid,
@@ -1448,7 +1554,7 @@ static void terminate_idle_sessions(struct session *sessions, const struct clien
     int64_t now = monotonic_milliseconds();
     int64_t timeout_ms = (int64_t) idle_timeout_seconds * 1000;
     for (struct session *session = sessions; session; session = session->next) {
-        if (!session->terminate_deadline_ms &&
+        if (!session->protected && !session->terminate_deadline_ms &&
             attached_client_count(clients, session) == 0 &&
             now - session->last_activity_ms >= timeout_ms) {
             fprintf(stderr, "lumen-pty: reclaiming idle session %s\n", session->id);
@@ -1474,7 +1580,7 @@ static void discover_tmux_sessions(struct session **sessions,
         dup2(fds[1], STDOUT_FILENO);
         close(fds[1]);
         execl(config->tmux, config->tmux, "-L", "lumen", "list-sessions",
-              "-F", "#{session_name}\t#{session_created}", (char *)NULL);
+              "-F", "#{session_name}\t#{session_created}\t#{@lumen_protected}", (char *)NULL);
         _exit(127);
     }
     close(fds[1]);
@@ -1483,7 +1589,8 @@ static void discover_tmux_sessions(struct session **sessions,
     while (stream && fgets(line, sizeof(line), stream)) {
         char name[64] = "";
         long long created = 0;
-        if (sscanf(line, "%63[^\t]\t%lld", name, &created) != 2 ||
+        char protected_value[8] = "";
+        if (sscanf(line, "%63[^\t]\t%lld\t%7s", name, &created, protected_value) < 2 ||
             strncmp(name, "lumen-", 6) != 0)
             continue;
         const char *id = name + 6;
@@ -1498,6 +1605,7 @@ static void discover_tmux_sessions(struct session **sessions,
         session->created_at = (time_t)created;
         session->last_activity_at = session->created_at;
         session->restored_from_tmux = true;
+        session->protected = !strcmp(protected_value, "1");
         session->last_activity_ms = monotonic_milliseconds();
         session->last_activity_at = time(NULL);
         session->next = *sessions;
@@ -1714,6 +1822,9 @@ static void usage(FILE *stream) {
             "Usage:\n"
             "  lumen-pty <session-id> [browser-connection-key] [skip-replay] [read-only]\n"
             "  lumen-pty --kill <session-id>\n"
+            "  lumen-pty --kill-force <session-id>\n"
+            "  lumen-pty --protect <session-id>\n"
+            "  lumen-pty --unprotect <session-id>\n"
             "  lumen-pty --disconnect <connection-id>\n"
             "  lumen-pty --list\n"
             "  lumen-pty --list-json\n"
@@ -1774,6 +1885,15 @@ int main(int argc, char **argv) {
 
     if (argc == 3 && strcmp(argv[1], "--kill") == 0) {
         return control_client(socket_path, MSG_KILL, argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--kill-force") == 0) {
+        return control_client(socket_path, MSG_KILL_FORCE, argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--protect") == 0) {
+        return control_client(socket_path, MSG_PROTECT, argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--unprotect") == 0) {
+        return control_client(socket_path, MSG_UNPROTECT, argv[2]);
     }
     if (argc == 3 && strcmp(argv[1], "--disconnect") == 0) {
         char *end = NULL;

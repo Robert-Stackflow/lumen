@@ -278,7 +278,7 @@ a:focus-visible {
 .terminal-tab {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(42px, 1fr) auto auto auto;
+  grid-template-columns: auto minmax(42px, 1fr) auto auto auto auto;
   align-items: center;
   gap: 7px;
   flex: 0 0 auto;
@@ -299,6 +299,32 @@ a:focus-visible {
     background-color 130ms ease,
     border-color 130ms ease,
     box-shadow 130ms ease;
+}
+
+.tab-protection {
+  display: grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  color: var(--green);
+}
+
+.tab-protection[hidden] {
+  display: none;
+}
+
+.tab-protection svg {
+  width: 14px;
+  height: 14px;
+  fill: color-mix(in srgb, var(--green) 8%, transparent);
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.7;
+}
+
+.terminal-tab.is-protected {
+  border-color: color-mix(in srgb, var(--green) 20%, var(--border));
 }
 
 .terminal-tab.is-pinned {
@@ -2521,7 +2547,8 @@ a:focus-visible {
 }
 
 .session-count-badge,
-.current-connection-badge {
+.current-connection-badge,
+.session-protected-badge {
   flex: none;
   padding: 3px 6px;
   border-radius: 999px;
@@ -2531,8 +2558,24 @@ a:focus-visible {
   letter-spacing: 0;
 }
 
+.session-protected-badge {
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+  color: var(--green);
+}
+
 .session-manager-row button {
-  width: 54px;
+  width: auto;
+  min-width: 54px;
+  padding: 0 10px;
+}
+
+.session-dialog.is-protected-warning .dialog-mark {
+  background: var(--red);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+.session-dialog.is-protected-warning .session-dialog-card {
+  border-color: color-mix(in srgb, var(--red) 26%, var(--border));
 }
 
 .session-manager-actions {

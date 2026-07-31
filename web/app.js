@@ -206,7 +206,7 @@
   const toastAction = document.getElementById('toast-action');
   const mobileKeys = document.getElementById('mobile-keys');
   const sessionDialog = document.getElementById('session-dialog');
-  const sessionDialogName = document.getElementById('session-dialog-name');
+  const sessionDialogDescription = document.getElementById('session-dialog-description');
   const sessionDetach = document.getElementById('session-detach');
   const sessionTerminate = document.getElementById('session-terminate');
   const sessionCancel = document.getElementById('session-cancel');
@@ -232,6 +232,7 @@
   let pingSequence = 0;
   let mobileCtrl = false;
   let pendingCloseId = null;
+  let pendingForceTerminate = false;
   let sessionActionPending = false;
   let pendingConnection = null;
   let contextMenuRestoreFocus = null;
@@ -1132,6 +1133,13 @@
     connections.hidden = true;
     connections.title = '当前连接数';
 
+    const protection = document.createElement('span');
+    protection.className = 'tab-protection';
+    protection.hidden = true;
+    protection.title = '此会话受保护，不参与空闲清理';
+    protection.innerHTML =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.9 8 7 10 4.1-2 7-5.4 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>';
+
     const close = document.createElement('button');
     close.className = 'close-tab';
     close.type = 'button';
@@ -1139,7 +1147,7 @@
     close.setAttribute('aria-label', `关闭或结束 ${session.name}`);
     close.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>';
 
-    tab.append(dot, name, latency, connections, close);
+    tab.append(dot, name, latency, connections, protection, close);
     tab.addEventListener('click', event => {
       if (!event.target.closest('.close-tab, .tab-name-input')) activateSession(session.id);
     });
@@ -1251,6 +1259,7 @@
       remoteTitle: '',
       hasConnected: false,
       pinned: Boolean(meta.pinned),
+      protected: false,
       readOnly: false,
       hasTerminalState: false,
       restoring: false,
@@ -1544,9 +1553,17 @@
 
   function openSessionDialog(id, displayName = '') {
     const session = sessions.get(id);
+    const inventory = sessionInventory.find(item => item.id === id);
+    const protectedSession = Boolean(inventory?.protected || session?.protected);
     if ((!session && !displayName) || sessionActionPending) return;
     pendingCloseId = id;
-    sessionDialogName.textContent = session?.name || displayName;
+    pendingForceTerminate = protectedSession;
+    sessionDialogDescription.textContent = protectedSession
+      ? `${session?.name || displayName} 是受保护会话。仍然结束会终止其中所有程序，且无法恢复。`
+      : `${session?.name || displayName} 的后台任务需要如何处理？`;
+    sessionTerminate.querySelector('span').textContent =
+      protectedSession ? '仍要结束受保护会话' : '结束终端会话';
+    sessionDialog.classList.toggle('is-protected-warning', protectedSession);
     sessionDetach.hidden = !session;
     sessionDetach.disabled = Boolean(session && sessions.size === 1);
     sessionDetach.title = session && sessions.size === 1 ? '界面至少保留一个标签' : '';
@@ -1567,6 +1584,34 @@
     updateTabPinControl(session);
     saveState();
     showToast(session.pinned ? '标签已固定' : '已取消固定');
+  }
+
+  async function setSessionProtected(id, protectedSession) {
+    try {
+      const response = await fetch(`${basePath}/api/sessions/${encodeURIComponent(id)}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'X-Lumen-Action': protectedSession ? 'protect' : 'unprotect' },
+      });
+      if (response.status === 404) {
+        await refreshSessionInventory();
+        showToast('该会话已经结束，列表已刷新');
+        return;
+      }
+      if (!response.ok) throw new Error(`protection endpoint returned ${response.status}`);
+      const session = sessions.get(id);
+      if (session) {
+        session.protected = protectedSession;
+        session.tab.classList.toggle('is-protected', protectedSession);
+        session.tab.querySelector('.tab-protection').hidden = !protectedSession;
+      }
+      await refreshSessionInventory();
+      showToast(protectedSession ? '会话已保护，不会参与空闲清理' : '已取消会话保护');
+    } catch (error) {
+      globalThis.LumenDiagnostics.report('会话保护', error);
+      showToast('无法更新会话保护状态');
+    }
   }
 
   function updateTabPinControl(session) {
@@ -1615,6 +1660,7 @@
     if (sessionActionPending) return;
     sessionDialog.close();
     pendingCloseId = null;
+    pendingForceTerminate = false;
   }
 
   async function terminateSession(id) {
@@ -1635,11 +1681,20 @@
         cache: 'no-store',
         headers: {
           Accept: 'application/json',
-          'X-Lumen-Action': 'terminate',
+          'X-Lumen-Action': pendingForceTerminate ? 'terminate-force' : 'terminate',
         },
       });
       if (response.status === 401 || response.redirected) {
         window.location.assign(`${basePath}/login`);
+        return;
+      }
+      if (response.status === 409) {
+        pendingForceTerminate = true;
+        sessionDialogDescription.textContent =
+          `${session?.name || id} 已被设为受保护会话。请再次确认是否强制结束。`;
+        sessionTerminate.querySelector('span').textContent = '仍要结束受保护会话';
+        sessionDialog.classList.add('is-protected-warning');
+        showToast('此会话受保护，需要再次确认');
         return;
       }
       if (!response.ok && response.status !== 404) {
@@ -1649,6 +1704,7 @@
 
       if (sessionDialog.open) sessionDialog.close();
       pendingCloseId = null;
+      pendingForceTerminate = false;
       if (!session) {
         showToast('终端会话及其中程序已结束');
         void refreshSessionInventory();
@@ -1669,7 +1725,8 @@
       showToast('无法结束会话，请稍后重试');
     } finally {
       sessionActionPending = false;
-      label.textContent = originalLabel;
+      label.textContent = pendingForceTerminate && sessionDialog.open
+        ? '仍要结束受保护会话' : originalLabel;
       sessionTerminate.disabled = false;
       sessionCancel.disabled = false;
       if (sessionDialog.open) sessionDetach.disabled = sessions.size === 1;
@@ -1872,6 +1929,12 @@
         icon: session.pinned ? 'unpin' : 'pin',
         action: () => setSessionPinned(session, !session.pinned),
       },
+      { separator: true },
+      {
+        label: session.protected ? '取消保护会话' : '保护会话',
+        icon: session.protected ? 'unprotect' : 'protect',
+        action: () => void setSessionProtected(session.id, !session.protected),
+      },
       {
         label: session.readOnly ? '恢复终端输入' : '切换为只读',
         icon: session.readOnly ? 'writable' : 'readonly',
@@ -1883,7 +1946,9 @@
         disabled: session.readOnly || session.state !== 'online',
         action: () => claimSessionSize(session),
       },
+      { separator: true },
       ...splitItems,
+      { separator: true },
       { label: '导出终端输出', icon: 'export', action: () => exportCurrentTerminal(session) },
       { separator: true },
       {
@@ -2018,7 +2083,11 @@
       sessionInventory = inventory;
       const byId = new Map(inventory.map(item => [item.id, item]));
       for (const session of sessions.values()) {
-        const count = Number(byId.get(session.id)?.clients || 0);
+        const item = byId.get(session.id);
+        const count = Number(item?.clients || 0);
+        session.protected = Boolean(item?.protected);
+        session.tab.classList.toggle('is-protected', session.protected);
+        session.tab.querySelector('.tab-protection').hidden = !session.protected;
         session.connections.textContent = count > 9 ? '9+' : String(count);
         session.connections.hidden = count < 2;
         session.connections.title = `当前 ${count} 个连接`;
@@ -2073,6 +2142,12 @@
       countBadge.className = 'session-count-badge';
       countBadge.textContent = `${item.clients} 个连接`;
       title.append(countBadge);
+      if (item.protected) {
+        const protectedBadge = document.createElement('span');
+        protectedBadge.className = 'session-protected-badge';
+        protectedBadge.textContent = '受保护';
+        title.append(protectedBadge);
+      }
       const createdAt = Number(item.createdAt || 0) * 1000;
       copy.querySelector('small').textContent =
         `${item.id} · 创建于 ${formatDateTime(createdAt)} · PID ${item.pid} · ${item.rows}×${item.columns}`;
@@ -2120,6 +2195,10 @@
         settingsDialog.close();
         openSessionDialog(item.id, session?.name || item.id);
       });
+      const protect = document.createElement('button');
+      protect.type = 'button';
+      protect.textContent = item.protected ? '取消保护' : '保护';
+      protect.addEventListener('click', () => void setSessionProtected(item.id, !item.protected));
       const actions = document.createElement('span');
       actions.className = 'session-manager-actions';
       const copyInfo = document.createElement('button');
@@ -2137,7 +2216,7 @@
         ].join('\n');
         void writeSystemClipboard(text, true, true);
       });
-      actions.append(activate, copyInfo, terminate);
+      actions.append(activate, copyInfo, protect, terminate);
       const connections = document.createElement('div');
       connections.className = 'session-connections';
       const connectionItems = Array.isArray(item.connections) ? item.connections : [];
@@ -2243,7 +2322,8 @@
   function idleSessionCandidates() {
     const cutoff = Date.now() / 1000 - settings.idleCleanupSeconds;
     return sessionInventory.filter(item =>
-      Number(item.clients) === 0 && Number(item.lastActivityAt || item.createdAt) < cutoff);
+      !item.protected && Number(item.clients) === 0
+      && Number(item.lastActivityAt || item.createdAt) < cutoff);
   }
 
   function cleanupResourceSummary(candidates) {
@@ -2262,11 +2342,12 @@
 
   function renderIdleCleanupPreview() {
     const summary = cleanupResourceSummary(idleSessionCandidates());
+    const protectedCount = sessionInventory.filter(item => item.protected).length;
     cleanupIdleSessionsButton.disabled = summary.count === 0;
     cleanupIdleSessionsButton.textContent = summary.count ? `清理空闲 · ${summary.count}` : '清理空闲';
     idleCleanupPreview.textContent = summary.count
-      ? `当前有 ${summary.count} 个零连接会话超过 ${idleThresholdLabel()}，预计释放约 ${summary.mib.toFixed(1)} MiB 已统计资源`
-      : `当前没有零连接会话超过 ${idleThresholdLabel()}`;
+      ? `当前有 ${summary.count} 个零连接会话超过 ${idleThresholdLabel()}，预计释放约 ${summary.mib.toFixed(1)} MiB 已统计资源${protectedCount ? `；已排除 ${protectedCount} 个受保护会话` : ''}`
+      : `当前没有零连接会话超过 ${idleThresholdLabel()}${protectedCount ? `；已排除 ${protectedCount} 个受保护会话` : ''}`;
   }
 
   function openIdleCleanup() {
@@ -2954,6 +3035,11 @@
       return;
     }
     pendingCloseId = null;
+    pendingForceTerminate = false;
+  });
+  sessionDialog.addEventListener('close', () => {
+    pendingForceTerminate = false;
+    sessionDialog.classList.remove('is-protected-warning');
   });
   sessionDialog.addEventListener('click', event => {
     if (event.target === sessionDialog) closeSessionDialog();
