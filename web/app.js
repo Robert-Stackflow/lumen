@@ -188,6 +188,7 @@
   const sessionStatusFilter = document.getElementById('session-status-filter');
   const sessionSelectionCount = document.getElementById('session-selection-count');
   const serviceHealthGrid = document.getElementById('service-health-grid');
+  const serviceHealthSummary = document.getElementById('service-health-summary');
   const commandSnippetList = document.getElementById('command-snippet-list');
   const commandSnippetEditor = document.getElementById('command-snippet-editor');
   const commandSnippetName = document.getElementById('command-snippet-name');
@@ -236,6 +237,8 @@
   let mobileCtrl = false;
   let pendingCloseId = null;
   let pendingForceTerminate = false;
+  let websocketReconnectCount = 0;
+  let latestHealthReport = null;
   let sessionActionPending = false;
   let pendingConnection = null;
   let contextMenuRestoreFocus = null;
@@ -1017,6 +1020,7 @@
     } catch (error) {
       setConnectionState(session, 'offline');
       session.reconnectAttempts += 1;
+      websocketReconnectCount += 1;
       if (session.reconnectAttempts === 2) showToast('无法验证访问身份，请检查安全入口');
       scheduleReconnect(session);
       return;
@@ -1076,6 +1080,7 @@
         globalThis.LumenDiagnostics.report('WebSocket', `连接关闭：${event.code} ${event.reason || ''}`.trim());
       }
       session.reconnectAttempts += 1;
+      websocketReconnectCount += 1;
       scheduleReconnect(session);
     });
 
@@ -2486,36 +2491,79 @@
     return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
   }
 
-  async function refreshServiceHealth() {
-    serviceHealthGrid.innerHTML = '<div class="session-manager-loading">正在读取服务状态…</div>';
+  async function refreshServiceHealth(showLoading = true) {
+    if (showLoading) serviceHealthGrid.innerHTML = '<div class="session-manager-loading">正在读取服务状态…</div>';
     try {
       const response = await fetch(`${basePath}/api/health`, {
         credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' },
       });
       if (!response.ok) throw new Error(`health returned ${response.status}`);
       const health = await response.json();
+      const memoryPercent = Number(health.memory?.totalBytes)
+        ? Number(health.memory.usedBytes) / Number(health.memory.totalBytes) * 100 : 0;
+      const diskPercent = Number(health.disk?.totalBytes)
+        ? Number(health.disk.usedBytes) / Number(health.disk.totalBytes) * 100 : 0;
+      const resourceStatus = percent => percent >= 95 ? 'critical' : percent >= 85 ? 'warning' : 'ok';
+      const diskStatus = diskPercent >= 90 ? 'critical' : diskPercent >= 80 ? 'warning' : 'ok';
+      const ptyLatency = Number(health.pty?.latencyMs || 0);
+      const ptyStatus = ptyLatency >= 1000 ? 'critical' : ptyLatency >= 200 ? 'warning' : health.pty?.status;
+      const recentError = globalThis.LumenDiagnostics.list()[0] || null;
+      health.frontend = {
+        reconnects: websocketReconnectCount,
+        latestError: recentError,
+        userAgent: navigator.userAgent,
+        capturedAt: new Date().toISOString(),
+      };
+      latestHealthReport = health;
       const cards = [
-        ['Web', health.web?.status, `运行 ${formatDuration(Number(health.web?.uptimeSeconds || 0) * 1000)} · 内存 ${(Number(health.web?.memoryKb || 0) / 1024).toFixed(1)} MiB`],
-        ['PTY', health.pty?.status, `${Number(health.pty?.sessions || 0)} 个会话`],
-        ['WebSocket', health.websocket?.status, `${Number(health.websocket?.connections || 0)} 个活动连接`],
-        ['tmux', health.tmux?.status, `${Number(health.tmux?.sessions || 0)} 个持久会话`],
-        ['主机内存', 'ok', `${formatResourceBytes(health.memory?.usedBytes)} / ${formatResourceBytes(health.memory?.totalBytes)}`],
-        ['磁盘', 'ok', `${formatResourceBytes(health.disk?.usedBytes)} / ${formatResourceBytes(health.disk?.totalBytes)}`],
+        { name: 'Web', status: health.web?.status, detail: `运行 ${formatDuration(Number(health.web?.uptimeSeconds || 0) * 1000)} · 内存 ${(Number(health.web?.memoryKb || 0) / 1024).toFixed(1)} MiB` },
+        { name: 'PTY', status: ptyStatus, detail: `${Number(health.pty?.sessions || 0)} 个会话 · 响应 ${ptyLatency} ms` },
+        { name: 'WebSocket', status: websocketReconnectCount >= 20 ? 'critical' : websocketReconnectCount >= 5 ? 'warning' : health.websocket?.status, detail: `${Number(health.websocket?.connections || 0)} 个活动连接 · 本页重连 ${websocketReconnectCount} 次` },
+        { name: 'tmux', status: health.tmux?.status, detail: `${Number(health.tmux?.sessions || 0)} 个持久会话 · 实际命令探测` },
+        { name: '主机内存', status: resourceStatus(memoryPercent), detail: `${formatResourceBytes(health.memory?.usedBytes)} / ${formatResourceBytes(health.memory?.totalBytes)}`, percent: memoryPercent },
+        { name: '磁盘', status: diskStatus, detail: `${formatResourceBytes(health.disk?.usedBytes)} / ${formatResourceBytes(health.disk?.totalBytes)}`, percent: diskPercent },
       ];
-      serviceHealthGrid.replaceChildren(...cards.map(([name, status, detail]) => {
+      const severity = cards.some(card => card.status === 'critical' || card.status === 'error')
+        ? 'critical' : cards.some(card => card.status === 'warning') ? 'warning' : 'ok';
+      settingsButton.classList.toggle('has-health-warning', severity !== 'ok');
+      settingsButton.dataset.healthStatus = severity;
+      serviceHealthSummary.textContent =
+        `${severity === 'ok' ? '所有服务正常' : severity === 'warning' ? '检测到资源预警' : '检测到服务异常'} · 每 5 秒自动刷新`
+        + (recentError ? ` · 最近异常 ${formatDateTime(recentError.timestamp)}` : '');
+      serviceHealthGrid.replaceChildren(...cards.map(cardData => {
         const card = document.createElement('article');
         card.className = 'service-health-card';
-        card.dataset.status = status || 'unknown';
-        card.innerHTML = '<span class="health-dot"></span><span><strong></strong><small></small></span><b></b>';
-        card.querySelector('strong').textContent = name;
-        card.querySelector('small').textContent = detail;
-        card.querySelector('b').textContent = status === 'ok' ? '正常' : status === 'idle' ? '空闲' : '异常';
+        card.dataset.status = cardData.status || 'unknown';
+        card.innerHTML = '<span class="health-dot"></span><span><strong></strong><small></small><i class="health-progress"><i></i></i></span><b></b>';
+        card.querySelector('strong').textContent = cardData.name;
+        card.querySelector('small').textContent = cardData.detail;
+        const progress = card.querySelector('.health-progress');
+        progress.hidden = cardData.percent == null;
+        progress.firstElementChild.style.width = `${Math.min(100, cardData.percent || 0)}%`;
+        card.querySelector('b').textContent =
+          cardData.status === 'ok' ? '正常' : cardData.status === 'idle' ? '空闲'
+            : cardData.status === 'warning' ? '预警' : '异常';
         return card;
       }));
     } catch (error) {
+      settingsButton.classList.add('has-health-warning');
+      settingsButton.dataset.healthStatus = 'critical';
       globalThis.LumenDiagnostics.report('服务健康', error);
-      serviceHealthGrid.innerHTML = '<div class="session-manager-loading">无法读取服务状态</div>';
+      if (activeSettingsTab === 'health' && settingsDialog.open)
+        serviceHealthGrid.innerHTML = '<div class="session-manager-loading">无法读取服务状态</div>';
     }
+  }
+
+  function copyServiceDiagnostics() {
+    if (!latestHealthReport) {
+      showToast('健康数据尚未加载');
+      return;
+    }
+    const copied = copyWithSelection(JSON.stringify({
+      health: latestHealthReport,
+      diagnostics: globalThis.LumenDiagnostics.list(),
+    }, null, 2));
+    showToast(copied ? '诊断信息已复制' : '无法复制诊断信息');
   }
 
   function renderAuditLog() {
@@ -3292,6 +3340,7 @@
   document.getElementById('export-diagnostics').addEventListener('click', exportDiagnostics);
   document.getElementById('refresh-service-health').addEventListener('click',
     () => void refreshServiceHealth());
+  document.getElementById('copy-service-diagnostics').addEventListener('click', copyServiceDiagnostics);
   globalThis.LumenDiagnostics.subscribe(() => {
     if (activeSettingsTab === 'diagnostics' && settingsDialog.open) renderDiagnostics();
   });
@@ -3501,6 +3550,10 @@
         && settingsDialog.open && auditAutoRefresh.checked) await refreshAuditLog();
   }, () => 10000);
   auditPoller.start(10000);
+  const healthPoller = new AdaptivePoller(async () => {
+    if (!document.hidden) await refreshServiceHealth(false);
+  }, () => activeSettingsTab === 'health' && settingsDialog.open ? 5000 : 30000);
+  healthPoller.start(1500);
 
   systemThemeQuery.addEventListener?.('change', event => {
     if (followsSystemTheme) applyTheme(event.matches ? 'light' : 'dark', false);

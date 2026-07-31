@@ -22,6 +22,9 @@ assert 'id="session-status-filter"' in page
 assert 'id="protect-selected-sessions"' in page
 assert 'id="terminate-selected-sessions"' in page
 assert "refreshServiceHealth" in app
+assert "copyServiceDiagnostics" in app
+assert "websocketReconnectCount" in app
+assert "has-health-warning" in app
 assert "setSessionProtected" in app
 assert "terminate-force" in app
 assert "!item.protected" in app

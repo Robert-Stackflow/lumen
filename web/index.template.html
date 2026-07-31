@@ -340,8 +340,12 @@
           <section class="settings-panel" data-settings-panel="health" hidden>
             <header class="settings-panel-heading">
               <span><h3>服务健康</h3><p>PTY、WebSocket、tmux 和主机资源状态</p></span>
-              <button id="refresh-service-health" type="button">刷新</button>
+              <span class="settings-heading-actions">
+                <button id="copy-service-diagnostics" type="button">复制诊断</button>
+                <button id="refresh-service-health" type="button">刷新</button>
+              </span>
             </header>
+            <div id="service-health-summary" class="service-health-summary">每 5 秒自动刷新</div>
             <div id="service-health-grid" class="service-health-grid">
               <div class="session-manager-loading">正在读取服务状态…</div>
             </div>

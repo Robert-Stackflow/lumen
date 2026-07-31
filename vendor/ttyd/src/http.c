@@ -3,6 +3,7 @@
 #include <openssl/crypto.h>
 #include <qrencode.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -324,6 +325,26 @@ static char *list_sessions(size_t *output_len) {
   }
   *output_len = used;
   return body;
+}
+
+static bool probe_tmux(void) {
+  pid_t pid = fork();
+  if (pid < 0) return false;
+  if (pid == 0) {
+    int null_fd = open("/dev/null", O_WRONLY);
+    if (null_fd >= 0) {
+      dup2(null_fd, STDOUT_FILENO);
+      dup2(null_fd, STDERR_FILENO);
+      close(null_fd);
+    }
+    execlp("tmux", "tmux", "-L", "lumen", "list-sessions", (char *)NULL);
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 static char *replace_template_token(char *source, const char *token, const char *value) {
@@ -745,14 +766,21 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         int auth_result = check_auth(wsi);
         if (auth_result != AUTH_OK)
           return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
+        struct timespec pty_started, pty_finished;
+        clock_gettime(CLOCK_MONOTONIC, &pty_started);
         size_t inventory_len = 0;
         char *inventory = list_sessions(&inventory_len);
+        clock_gettime(CLOCK_MONOTONIC, &pty_finished);
         if (!inventory) return send_empty(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL, NULL, NULL);
         unsigned int sessions = 0, connections = 0;
         for (char *cursor = inventory; (cursor = strstr(cursor, "\"pid\":")); cursor += 6) sessions++;
         for (char *cursor = inventory; (cursor = strstr(cursor, "\"clients\":")); cursor += 10)
           connections += (unsigned int)strtoul(cursor + 10, NULL, 10);
         free(inventory);
+        long long pty_latency_ms =
+            (pty_finished.tv_sec - pty_started.tv_sec) * 1000LL
+            + (pty_finished.tv_nsec - pty_started.tv_nsec) / 1000000LL;
+        bool tmux_ok = probe_tmux();
         struct sysinfo system_info = {0};
         struct statvfs disk_info = {0};
         sysinfo(&system_info);
@@ -791,14 +819,14 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         int written = snprintf(body, 768,
                                "{\"status\":\"ok\",\"version\":\"%s\","
                                "\"web\":{\"status\":\"ok\",\"uptimeSeconds\":%lld,\"memoryKb\":%lu},"
-                               "\"pty\":{\"status\":\"ok\",\"sessions\":%u},"
+                               "\"pty\":{\"status\":\"ok\",\"sessions\":%u,\"latencyMs\":%lld},"
                                "\"websocket\":{\"status\":\"ok\",\"connections\":%u},"
                                "\"tmux\":{\"status\":\"%s\",\"sessions\":%u},"
                                "\"memory\":{\"usedBytes\":%llu,\"totalBytes\":%llu},"
                                "\"disk\":{\"usedBytes\":%llu,\"totalBytes\":%llu}}",
                                TTYD_VERSION, (long long)(time(NULL) - http_started_at),
-                               web_memory_kb, sessions, connections,
-                               sessions ? "ok" : "idle", sessions,
+                               web_memory_kb, sessions, pty_latency_ms, connections,
+                               tmux_ok ? "ok" : sessions ? "error" : "idle", sessions,
                                memory_total - memory_available, memory_total,
                                disk_total - disk_available, disk_total);
         if (written < 0 || written >= 768) {

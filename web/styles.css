@@ -579,6 +579,26 @@ a:focus-visible {
   padding: 0;
 }
 
+#settings-toggle {
+  position: relative;
+}
+
+#settings-toggle.has-health-warning::after {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--chrome-solid);
+  border-radius: 50%;
+  background: var(--yellow);
+  content: "";
+}
+
+#settings-toggle[data-health-status="critical"]::after {
+  background: var(--red);
+}
+
 .icon-button:hover,
 .add-button:hover {
   border-color: var(--border-strong);
@@ -2589,6 +2609,12 @@ a:focus-visible {
   gap: 10px;
 }
 
+.service-health-summary {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .service-health-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -2614,6 +2640,48 @@ a:focus-visible {
 .service-health-card b {
   color: var(--green);
   font-size: 10px;
+}
+
+.service-health-card[data-status="warning"] b,
+.service-health-card[data-status="warning"] .health-dot {
+  color: var(--yellow);
+  background: var(--yellow);
+}
+
+.service-health-card[data-status="critical"] b,
+.service-health-card[data-status="error"] b,
+.service-health-card[data-status="critical"] .health-dot,
+.service-health-card[data-status="error"] .health-dot {
+  color: var(--red);
+  background: var(--red);
+}
+
+.health-progress {
+  display: block;
+  height: 4px;
+  margin-top: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-strong);
+}
+
+.health-progress[hidden] {
+  display: none;
+}
+
+.health-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+
+.service-health-card[data-status="warning"] .health-progress > i {
+  background: var(--yellow);
+}
+
+.service-health-card[data-status="critical"] .health-progress > i {
+  background: var(--red);
 }
 
 .health-dot {
