@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -51,6 +52,7 @@ enum message_type {
     MSG_PROTECT = 8,
     MSG_UNPROTECT = 9,
     MSG_KILL_FORCE = 10,
+    MSG_ENSURE_WORKER = 11,
     MSG_OUTPUT = 101,
     MSG_STATUS = 102,
     MSG_EXIT = 103,
@@ -62,6 +64,7 @@ enum status_code {
     STATUS_NOT_FOUND = 3,
     STATUS_DISCONNECTED = 4,
     STATUS_PROTECTED = 5,
+    STATUS_LEGACY = 6,
     STATUS_INVALID = 64,
     STATUS_UNAVAILABLE = 75,
 };
@@ -137,11 +140,14 @@ struct server_config {
     unsigned int idle_timeout_seconds;
     const char *tmux;
     const char *tmux_label;
+    const char *worker_dir;
+    const char *worker_id;
     uid_t shell_uid;
     gid_t shell_gid;
     uid_t client_uid;
     bool client_uid_set;
     bool privileged;
+    bool worker_default;
 };
 
 static volatile sig_atomic_t server_stopping;
@@ -245,6 +251,24 @@ static int connect_to_server(const char *socket_path) {
         return -1;
     }
     return fd;
+}
+
+static bool worker_socket_path(char *target, size_t target_size,
+                               const char *worker_dir, const char *session_id) {
+    if (!worker_dir || !worker_dir[0] ||
+        !valid_session_id(session_id, strlen(session_id))) return false;
+    int written = snprintf(target, target_size, "%s/%s.sock", worker_dir, session_id);
+    return written > 0 && (size_t)written < target_size;
+}
+
+static bool default_worker_dir(char *target, size_t target_size,
+                               const char *supervisor_socket) {
+    const char *slash = strrchr(supervisor_socket, '/');
+    if (!slash) return false;
+    size_t parent_length = (size_t)(slash - supervisor_socket);
+    int written = snprintf(target, target_size, "%.*s/sessions",
+                           (int)parent_length, supervisor_socket);
+    return written > 0 && (size_t)written < target_size;
 }
 
 static size_t build_packet(unsigned char *target, size_t target_size, uint8_t type,
@@ -374,6 +398,38 @@ static int write_all(int fd, const unsigned char *data, size_t length) {
     return 0;
 }
 
+static int request_status(const char *socket_path, uint8_t type,
+                          const char *value, uint16_t rows, uint16_t columns) {
+    int fd = connect_to_server(socket_path);
+    if (fd < 0) return STATUS_UNAVAILABLE;
+    size_t length = value ? strlen(value) : 0;
+    int result = STATUS_UNAVAILABLE;
+    if (send_message_blocking(fd, type, 0, rows, columns, value, length) == 0) {
+        unsigned char packet[sizeof(struct message_header) + LUMEN_PACKET_DATA_MAX];
+        struct message_header header;
+        const unsigned char *payload;
+        if (receive_message_blocking(fd, packet, sizeof(packet), &header, &payload) == 0 &&
+            header.type == MSG_STATUS) result = header.status;
+    }
+    close(fd);
+    return result;
+}
+
+static const char *resolve_attach_socket(const char *supervisor_socket,
+                                         const char *session_id,
+                                         unsigned short rows, unsigned short columns,
+                                         char *worker_socket, size_t worker_socket_size) {
+    int route = request_status(supervisor_socket, MSG_ENSURE_WORKER,
+                               session_id, rows, columns);
+    if (route == STATUS_LEGACY) return supervisor_socket;
+    if (route != STATUS_OK) return NULL;
+    char worker_dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (!default_worker_dir(worker_dir, sizeof(worker_dir), supervisor_socket) ||
+        !worker_socket_path(worker_socket, worker_socket_size, worker_dir, session_id))
+        return NULL;
+    return worker_socket;
+}
+
 static int attach_client(const char *socket_path, const char *session_id,
                          const char *browser_key, bool skip_replay, bool read_only) {
     size_t id_length = strlen(session_id);
@@ -382,15 +438,22 @@ static int attach_client(const char *socket_path, const char *session_id,
         return STATUS_INVALID;
     }
 
-    int fd = connect_to_server(socket_path);
+    unsigned short rows = 24;
+    unsigned short columns = 80;
+    current_window_size(&rows, &columns);
+    char worker_socket[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    const char *attach_socket = resolve_attach_socket(
+        socket_path, session_id, rows, columns, worker_socket, sizeof(worker_socket));
+    if (!attach_socket) {
+        fprintf(stderr, "Could not resolve Lumen session backend.\n");
+        return STATUS_UNAVAILABLE;
+    }
+    int fd = connect_to_server(attach_socket);
     if (fd < 0) {
         fprintf(stderr, "Lumen PTY supervisor is unavailable: %s\n", strerror(errno));
         return STATUS_UNAVAILABLE;
     }
 
-    unsigned short rows = 24;
-    unsigned short columns = 80;
-    current_window_size(&rows, &columns);
     char hello[LUMEN_ID_MAX + 1 + 64 + 1 + 37 + 4] = {0};
     const char *address = getenv("LUMEN_CLIENT_IP");
     if (!address || !address[0] || strlen(address) >= 64) address = "unknown";
@@ -879,6 +942,10 @@ static struct session *create_session(struct session **sessions,
                                       const struct server_config *config,
                                       const char *id, unsigned short rows,
                                       unsigned short columns) {
+    if (config->worker_id && strcmp(config->worker_id, id) != 0) {
+        errno = EACCES;
+        return NULL;
+    }
     if (session_count(*sessions) >= config->max_sessions) {
         errno = ENOSPC;
         return NULL;
@@ -1284,7 +1351,7 @@ static struct client *accept_client(int listen_fd, const struct server_config *c
         return NULL;
     }
     client->fd = fd;
-    client->id = next_client_id++;
+    client->id = ((uint64_t)(uint32_t)getpid() << 32) | next_client_id++;
     client->connected_at = time(NULL);
     memcpy(client->address, "unknown", sizeof("unknown"));
     return client;
@@ -1294,6 +1361,193 @@ static bool queue_status_and_close(struct client *client, size_t queue_limit,
                                    uint16_t status) {
     client->close_after_flush = true;
     return queue_packet(client, queue_limit, MSG_STATUS, status, NULL, 0);
+}
+
+static int query_worker(const char *socket_path, uint8_t type, const char *value,
+                        unsigned char *reply, size_t reply_size,
+                        struct message_header *reply_header) {
+    int fd = connect_to_server(socket_path);
+    if (fd < 0) return STATUS_NOT_FOUND;
+    size_t value_length = value ? strlen(value) : 0;
+    int result = STATUS_UNAVAILABLE;
+    if (send_message_blocking(fd, type, 0, 0, 0, value, value_length) == 0) {
+        const unsigned char *payload;
+        if (receive_message_blocking(fd, reply, reply_size, reply_header, &payload) == 0) {
+            if (reply_header->type == MSG_STATUS) result = reply_header->status;
+            else if (reply_header->type == MSG_LIST_REPLY) result = STATUS_OK;
+        }
+    }
+    close(fd);
+    return result;
+}
+
+static bool worker_is_available(const struct server_config *config, const char *id) {
+    char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (!worker_socket_path(path, sizeof(path), config->worker_dir, id)) return false;
+    unsigned char reply[sizeof(struct message_header) + LUMEN_PACKET_DATA_MAX];
+    struct message_header header;
+    return query_worker(path, MSG_LIST_JSON, NULL, reply, sizeof(reply), &header) == STATUS_OK;
+}
+
+static unsigned int active_worker_count(const struct server_config *config) {
+    if (!config->worker_dir) return 0;
+    DIR *directory = opendir(config->worker_dir);
+    if (!directory) return 0;
+    unsigned int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        size_t length = strlen(entry->d_name);
+        if (length <= 5 || strcmp(entry->d_name + length - 5, ".sock")) continue;
+        char id[LUMEN_ID_MAX + 1];
+        size_t id_length = length - 5;
+        if (id_length >= sizeof(id)) continue;
+        memcpy(id, entry->d_name, id_length);
+        id[id_length] = '\0';
+        if (valid_session_id(id, id_length) && worker_is_available(config, id)) count++;
+    }
+    closedir(directory);
+    return count;
+}
+
+static int spawn_worker(const struct server_config *config, const char *id) {
+    char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (!worker_socket_path(socket_path, sizeof(socket_path), config->worker_dir, id))
+        return STATUS_INVALID;
+    char history[32], idle[32], shell_uid[32], shell_gid[32], client_uid[32];
+    snprintf(history, sizeof(history), "%zu", config->history_bytes);
+    snprintf(idle, sizeof(idle), "%u", config->idle_timeout_seconds);
+    snprintf(shell_uid, sizeof(shell_uid), "%lu", (unsigned long)config->shell_uid);
+    snprintf(shell_gid, sizeof(shell_gid), "%lu", (unsigned long)config->shell_gid);
+    snprintf(client_uid, sizeof(client_uid), "%lu", (unsigned long)config->client_uid);
+
+    pid_t pid = fork();
+    if (pid < 0) return STATUS_UNAVAILABLE;
+    if (pid == 0) {
+        setsid();
+        char *arguments[32];
+        size_t count = 0;
+        arguments[count++] = (char *)"lumen-pty";
+        arguments[count++] = (char *)"--serve";
+        arguments[count++] = (char *)"--socket";
+        arguments[count++] = socket_path;
+        arguments[count++] = (char *)"--shell";
+        arguments[count++] = (char *)config->shell;
+        arguments[count++] = (char *)"--cwd";
+        arguments[count++] = (char *)config->working_directory;
+        arguments[count++] = (char *)"--history-bytes";
+        arguments[count++] = history;
+        arguments[count++] = (char *)"--max-sessions";
+        arguments[count++] = (char *)"1";
+        arguments[count++] = (char *)"--idle-timeout";
+        arguments[count++] = idle;
+        arguments[count++] = (char *)"--shell-uid";
+        arguments[count++] = shell_uid;
+        arguments[count++] = (char *)"--shell-gid";
+        arguments[count++] = shell_gid;
+        arguments[count++] = (char *)"--worker-id";
+        arguments[count++] = (char *)id;
+        if (config->client_uid_set) {
+            arguments[count++] = (char *)"--client-uid";
+            arguments[count++] = client_uid;
+        }
+        if (config->privileged) arguments[count++] = (char *)"--privileged";
+        arguments[count] = NULL;
+        execv("/proc/self/exe", arguments);
+        _exit(127);
+    }
+
+    for (unsigned int attempt = 0; attempt < 100; attempt++) {
+        if (worker_is_available(config, id)) return STATUS_OK;
+        usleep(10000);
+    }
+    return STATUS_UNAVAILABLE;
+}
+
+static int ensure_worker(const struct server_config *config,
+                         struct session *sessions, const char *id) {
+    if (!config->worker_default || !config->worker_dir) return STATUS_LEGACY;
+    bool legacy_exists = find_session(sessions, id) != NULL;
+    bool worker_exists = worker_is_available(config, id);
+    if (legacy_exists && worker_exists) {
+        fprintf(stderr, "lumen-pty: backend conflict for session %s\n", id);
+        return STATUS_UNAVAILABLE;
+    }
+    if (legacy_exists) return STATUS_LEGACY;
+    if (worker_exists) return STATUS_OK;
+    if (session_count(sessions) + active_worker_count(config) >= config->max_sessions)
+        return STATUS_UNAVAILABLE;
+    return spawn_worker(config, id);
+}
+
+static int worker_control(const struct server_config *config, const char *id,
+                          uint8_t type, const char *value) {
+    char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (!worker_socket_path(path, sizeof(path), config->worker_dir, id))
+        return STATUS_NOT_FOUND;
+    unsigned char reply[sizeof(struct message_header) + LUMEN_PACKET_DATA_MAX];
+    struct message_header header;
+    return query_worker(path, type, value, reply, sizeof(reply), &header);
+}
+
+static int worker_control_any(const struct server_config *config,
+                              uint8_t type, const char *value) {
+    if (!config->worker_dir) return STATUS_NOT_FOUND;
+    DIR *directory = opendir(config->worker_dir);
+    if (!directory) return STATUS_NOT_FOUND;
+    int result = STATUS_NOT_FOUND;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        size_t length = strlen(entry->d_name);
+        if (length <= 5 || strcmp(entry->d_name + length - 5, ".sock")) continue;
+        char id[LUMEN_ID_MAX + 1];
+        size_t id_length = length - 5;
+        if (id_length >= sizeof(id)) continue;
+        memcpy(id, entry->d_name, id_length);
+        id[id_length] = '\0';
+        if (!valid_session_id(id, id_length)) continue;
+        result = worker_control(config, id, type, value);
+        if (result == STATUS_OK) break;
+    }
+    closedir(directory);
+    return result;
+}
+
+static bool append_worker_inventory(const struct server_config *config,
+                                    char *list, size_t list_size, size_t *used) {
+    if (!config->worker_dir) return true;
+    DIR *directory = opendir(config->worker_dir);
+    if (!directory) return errno == ENOENT;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        size_t name_length = strlen(entry->d_name);
+        if (name_length <= 5 || strcmp(entry->d_name + name_length - 5, ".sock")) continue;
+        char id[LUMEN_ID_MAX + 1];
+        size_t id_length = name_length - 5;
+        if (id_length >= sizeof(id)) continue;
+        memcpy(id, entry->d_name, id_length);
+        id[id_length] = '\0';
+        if (!valid_session_id(id, id_length)) continue;
+        char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+        if (!worker_socket_path(path, sizeof(path), config->worker_dir, id)) continue;
+        unsigned char reply[sizeof(struct message_header) + LUMEN_PACKET_DATA_MAX];
+        struct message_header header;
+        if (query_worker(path, MSG_LIST_JSON, NULL, reply, sizeof(reply), &header) != STATUS_OK)
+            continue;
+        const unsigned char *payload = reply + sizeof(struct message_header);
+        if (header.length < 2 || payload[0] != '[' || payload[header.length - 1] != ']')
+            continue;
+        size_t content_length = header.length - 2;
+        if (!content_length) continue;
+        if (*used > 1) {
+            if (*used + 1 >= list_size) { closedir(directory); return false; }
+            list[(*used)++] = ',';
+        }
+        if (*used + content_length >= list_size) { closedir(directory); return false; }
+        memcpy(list + *used, payload + 1, content_length);
+        *used += content_length;
+    }
+    closedir(directory);
+    return true;
 }
 
 static bool handle_client_message(struct client *client, struct session **sessions,
@@ -1317,6 +1571,21 @@ static bool handle_client_message(struct client *client, struct session **sessio
     if (!parse_packet(packet, (size_t) received, &header, &payload)) {
         queue_status_and_close(client, queue_limit, STATUS_INVALID);
         return true;
+    }
+
+    if (header.type == MSG_ENSURE_WORKER) {
+        if (client->session || !valid_session_id((const char *)payload, header.length)) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        char id[LUMEN_ID_MAX + 1] = {0};
+        memcpy(id, payload, header.length);
+        if (!session_matches_privilege(config, id) || config->worker_id) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        return queue_status_and_close(client, queue_limit,
+                                      (uint16_t)ensure_worker(config, *sessions, id));
     }
 
     if (header.type == MSG_HELLO) {
@@ -1406,7 +1675,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
         struct client *target = clients;
         while (target && (target->id != target_id || !target->session)) target = target->next;
         if (!target) {
-            queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+            int worker_result = worker_control_any(config, MSG_DISCONNECT, value);
+            queue_status_and_close(client, queue_limit, (uint16_t)worker_result);
             return true;
         }
         release_session_size(target, clients);
@@ -1458,7 +1728,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         struct session *session = find_session(*sessions, id);
         if (!session) {
-            queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+            int worker_result = worker_control(config, id, header.type, id);
+            queue_status_and_close(client, queue_limit, (uint16_t)worker_result);
             return true;
         }
         if (session->protected && header.type != MSG_KILL_FORCE) {
@@ -1483,6 +1754,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
             queue_status_and_close(client, queue_limit, STATUS_INVALID);
             return true;
         }
+        if (config->privileged) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
         char id[LUMEN_ID_MAX + 1] = {0};
         memcpy(id, payload, header.length);
         if (!session_matches_privilege(config, id)) {
@@ -1491,7 +1766,8 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         struct session *session = find_session(*sessions, id);
         if (!session) {
-            queue_status_and_close(client, queue_limit, STATUS_NOT_FOUND);
+            int worker_result = worker_control(config, id, header.type, id);
+            queue_status_and_close(client, queue_limit, (uint16_t)worker_result);
             return true;
         }
         bool protected = header.type == MSG_PROTECT;
@@ -1548,6 +1824,7 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            "\"foregroundPid\":%ld,\"foregroundCommand\":\"%s\","
                            "\"workingDirectory\":\"%s\",\"memoryKb\":%lu,\"cpuPercent\":%.1f,"
                            "\"lastActivityAt\":%lld,\"protected\":%s,\"privileged\":%s,"
+                           "\"backend\":\"%s\","
                            "\"connections\":[",
                            used > 1 ? "," : "", session->id, (long) session->pid,
                            attached_client_count(clients, session),
@@ -1557,8 +1834,9 @@ static bool handle_client_message(struct client *client, struct session **sessio
                            (long)foreground_pid, foreground_command, working_directory,
                            memory_kb, session->cpu_percent,
                            (long long)session->last_activity_at,
-                           session->protected ? "true" : "false",
-                           config->privileged ? "true" : "false")
+                           !config->privileged && session->protected ? "true" : "false",
+                           config->privileged ? "true" : "false",
+                           config->tmux && !config->worker_id ? "tmux-legacy" : "worker")
                 : snprintf(list + used, sizeof(list) - used,
                            "%-32s pid=%-7ld clients=%u history=%zu%s\n",
                            session->id, (long) session->pid,
@@ -1594,6 +1872,10 @@ static bool handle_client_message(struct client *client, struct session **sessio
                 list[used++] = ']';
                 list[used++] = '}';
             }
+        }
+        if (header.type == MSG_LIST_JSON && !config->worker_id &&
+            !append_worker_inventory(config, list, sizeof(list), &used)) {
+            return queue_status_and_close(client, queue_limit, STATUS_UNAVAILABLE);
         }
         if (header.type == MSG_LIST_JSON) {
             if (used >= sizeof(list) - 1) {
@@ -1684,7 +1966,7 @@ static void discover_tmux_sessions(struct session **sessions,
         session->created_at = (time_t)created;
         session->last_activity_at = session->created_at;
         session->restored_from_tmux = true;
-        session->protected = !strcmp(protected_value, "1");
+        session->protected = !config->privileged && !strcmp(protected_value, "1");
         session->last_activity_ms = monotonic_milliseconds();
         session->last_activity_at = time(NULL);
         session->next = *sessions;
@@ -1696,6 +1978,14 @@ static void discover_tmux_sessions(struct session **sessions,
 }
 
 static int serve(const struct server_config *config) {
+    if (config->worker_dir && !config->worker_id) {
+        if (mkdir(config->worker_dir, 0770) != 0 && errno != EEXIST) {
+            fprintf(stderr, "Could not create worker directory %s: %s\n",
+                    config->worker_dir, strerror(errno));
+            return 1;
+        }
+        if (chmod(config->worker_dir, 0770) != 0) return 1;
+    }
     int listen_fd = create_listen_socket(config->socket_path);
     if (listen_fd < 0) {
         fprintf(stderr, "Could not listen on %s: %s\n",
@@ -1713,6 +2003,7 @@ static int serve(const struct server_config *config) {
 
     struct session *sessions = NULL;
     struct client *clients = NULL;
+    bool worker_had_session = false;
     discover_tmux_sessions(&sessions, config);
     size_t queue_limit = config->history_bytes + LUMEN_QUEUE_EXTRA;
     fprintf(stderr, "lumen-pty: listening on %s (%zu byte replay, %u sessions)\n",
@@ -1724,6 +2015,7 @@ static int serve(const struct server_config *config) {
             client_total++;
         }
         unsigned int session_total = session_count(sessions);
+        if (config->worker_id && session_total) worker_had_session = true;
         size_t descriptor_count = 1 + client_total + session_total;
         struct pollfd descriptors[1 + LUMEN_CLIENTS_MAX + LUMEN_SESSIONS_MAX];
         void *owners[1 + LUMEN_CLIENTS_MAX + LUMEN_SESSIONS_MAX];
@@ -1851,6 +2143,7 @@ static int serve(const struct server_config *config) {
         if (child_changed) {
             reap_children(&sessions, clients, queue_limit);
         }
+        if (config->worker_id && worker_had_session && !sessions) break;
     }
 
     close(listen_fd);
@@ -1910,12 +2203,14 @@ static void usage(FILE *stream) {
             "  lumen-pty --serve [--socket PATH] [--shell PATH] [--cwd PATH]\\\n"
             "             [--history-bytes N] [--max-sessions N] [--idle-timeout N]\\\n"
             "             [--tmux PATH] [--tmux-label NAME] [--privileged]\\\n"
+            "             [--worker-dir PATH] [--worker-id ID]\\\n"
             "             [--shell-uid UID] [--shell-gid GID] [--client-uid UID]\n");
 }
 
 int main(int argc, char **argv) {
     const char *socket_path = default_socket_path();
     if (argc >= 2 && strcmp(argv[1], "--serve") == 0) {
+        char derived_worker_dir[sizeof(((struct sockaddr_un *)0)->sun_path)] = {0};
         struct passwd *account = getpwuid(getuid());
         const char *home = getenv("HOME");
         struct server_config config = {
@@ -1928,6 +2223,8 @@ int main(int argc, char **argv) {
             .shell_uid = getuid(),
             .shell_gid = getgid(),
         };
+        const char *backend = getenv("LUMEN_SESSION_BACKEND");
+        config.worker_default = !backend || !strcmp(backend, "worker");
         if (!config.shell || !config.shell[0]) {
             config.shell = account && account->pw_shell[0] ? account->pw_shell : "/bin/sh";
         }
@@ -1954,6 +2251,10 @@ int main(int argc, char **argv) {
                 config.tmux = argv[++index];
             } else if (strcmp(argv[index], "--tmux-label") == 0 && index + 1 < argc) {
                 config.tmux_label = argv[++index];
+            } else if (strcmp(argv[index], "--worker-dir") == 0 && index + 1 < argc) {
+                config.worker_dir = argv[++index];
+            } else if (strcmp(argv[index], "--worker-id") == 0 && index + 1 < argc) {
+                config.worker_id = argv[++index];
             } else if (strcmp(argv[index], "--privileged") == 0) {
                 config.privileged = true;
             } else if (strcmp(argv[index], "--shell-uid") == 0 && index + 1 < argc) {
@@ -1971,8 +2272,12 @@ int main(int argc, char **argv) {
                 return STATUS_INVALID;
             }
         }
+        if (!config.worker_id && !config.worker_dir &&
+            default_worker_dir(derived_worker_dir, sizeof(derived_worker_dir), config.socket_path))
+            config.worker_dir = derived_worker_dir;
         struct stat working_directory;
         if (!valid_session_id(config.tmux_label, strlen(config.tmux_label)) ||
+            (config.worker_id && !valid_session_id(config.worker_id, strlen(config.worker_id))) ||
             !config.socket_path[0] || access(config.shell, X_OK) != 0 ||
             (config.tmux && access(config.tmux, X_OK) != 0) ||
             stat(config.working_directory, &working_directory) != 0 ||

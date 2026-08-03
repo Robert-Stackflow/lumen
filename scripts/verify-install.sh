@@ -24,6 +24,7 @@ fi
 
 listen_target="$(config_value LUMEN_INTERFACE "$runtime_path")"
 listen_port="$(config_value LUMEN_PORT "$runtime_path")"
+session_backend="$(config_value LUMEN_SESSION_BACKEND "$runtime_path")"
 allowed_host="${1:-$(config_value allowed_host "$security_path")}"
 [[ -n "$allowed_host" ]] || allowed_host="localhost"
 
@@ -38,6 +39,13 @@ for attempt in {1..20}; do
 done
 [[ -S /run/lumen-terminal/pty.sock ]] && pass "Normal PTY socket is ready" || fail "Normal PTY socket is missing"
 [[ -S /run/lumen-root-terminal/pty.sock ]] && pass "Root PTY socket is ready" || fail "Root PTY socket is missing"
+[[ -d /run/lumen-terminal/sessions ]] && pass "Normal worker directory is ready" || fail "Normal worker directory is missing"
+[[ -d /run/lumen-root-terminal/sessions ]] && pass "Root worker directory is ready" || fail "Root worker directory is missing"
+if [[ "$session_backend" == "worker" || "$session_backend" == "tmux" ]]; then
+  pass "New-session backend is configured: $session_backend"
+else
+  fail "New-session backend is missing or invalid"
+fi
 
 if id lumen-web >/dev/null 2>&1; then
   if runuser -u lumen-web -- env LUMEN_PTY_SOCKET=/run/lumen-terminal/pty.sock \

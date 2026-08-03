@@ -43,10 +43,10 @@
       </div>
 
       <div class="chrome-actions">
-        <button id="health-monitor-toggle" class="icon-button" type="button"
-                aria-label="打开服务健康监控">
+        <button id="logout-toggle" class="icon-button" type="button"
+                title="退出登录" aria-label="退出登录">
           <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M4 13h3l2-6 4 11 2-5h5"/>
+            <path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M14 8l4 4-4 4M18 12H9"/>
           </svg>
         </button>
         <button id="export-terminal" class="icon-button" type="button"
@@ -68,8 +68,11 @@
             <circle cx="10" cy="12" r="2"/>
           </svg>
         </button>
-        <button id="theme-toggle" class="icon-button" type="button" title="切换到浅色主题" aria-label="切换到浅色主题">
+        <button id="theme-toggle" class="icon-button" type="button"
+                data-theme-preference="system"
+                title="当前跟随设备；切换到浅色主题" aria-label="当前跟随设备；切换到浅色主题">
           <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path class="theme-icon-system" d="M4 5.5h16v11H4zM9 20h6M12 16.5V20"/>
             <path class="theme-icon-sun" d="M12 3v2m0 14v2M3 12h2m14 0h2M5.64 5.64l1.42 1.42m9.88 9.88 1.42 1.42m0-12.72-1.42 1.42M7.06 16.94l-1.42 1.42M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/>
             <path class="theme-icon-moon" d="M20 15.2A8.4 8.4 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z"/>
           </svg>
@@ -129,15 +132,25 @@
 
       <div class="settings-layout">
         <nav class="settings-sidebar" aria-label="设置分类">
-          <button type="button" data-settings-tab="general" aria-selected="true">常规</button>
-          <button type="button" data-settings-tab="appearance" aria-selected="false">外观</button>
-          <button type="button" data-settings-tab="shortcuts" aria-selected="false">快捷键</button>
-          <button type="button" data-settings-tab="sessions" aria-selected="false">会话</button>
-          <button type="button" data-settings-tab="snippets" aria-selected="false">命令片段</button>
-          <button type="button" data-settings-tab="security" aria-selected="false">安全</button>
-          <button type="button" data-settings-tab="audit" aria-selected="false">审计日志</button>
-          <button type="button" data-settings-tab="diagnostics" aria-selected="false">错误诊断</button>
-          <button type="button" data-settings-tab="health" aria-selected="false">服务健康</button>
+          <div class="settings-sidebar-group">
+            <span class="settings-sidebar-label">终端</span>
+            <button type="button" data-settings-tab="general" aria-selected="true">常规</button>
+            <button type="button" data-settings-tab="appearance" aria-selected="false">外观</button>
+            <button type="button" data-settings-tab="shortcuts" aria-selected="false">快捷键</button>
+          </div>
+          <div class="settings-sidebar-group">
+            <span class="settings-sidebar-label">工作区</span>
+            <button type="button" data-settings-tab="sessions" aria-selected="false">会话</button>
+            <button type="button" data-settings-tab="snippets" aria-selected="false">命令片段</button>
+          </div>
+          <div class="settings-sidebar-group">
+            <span class="settings-sidebar-label">系统与安全</span>
+            <button type="button" data-settings-tab="security" aria-selected="false">安全</button>
+            <button type="button" data-settings-tab="audit" aria-selected="false">审计日志</button>
+            <button type="button" data-settings-tab="diagnostics" aria-selected="false">错误诊断</button>
+            <button type="button" data-settings-tab="health" aria-selected="false">服务健康</button>
+            <button type="button" data-settings-tab="dependencies" aria-selected="false">依赖检查</button>
+          </div>
         </nav>
 
         <div class="settings-content">
@@ -170,6 +183,19 @@
           <section class="settings-panel" data-settings-panel="appearance" hidden>
             <header><h3>外观</h3><p>字体、行距与光标显示</p></header>
             <div class="settings-list">
+              <div class="settings-row">
+                <span><strong>颜色模式</strong><small>跟随设备外观，或固定使用浅色、深色主题</small></span>
+                <div id="setting-theme" class="custom-select" data-value="system">
+                  <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span>跟随设备</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                  </button>
+                  <div class="custom-select-menu" role="listbox" hidden>
+                    <button type="button" role="option" data-value="system">跟随设备</button>
+                    <button type="button" role="option" data-value="light">浅色</button>
+                    <button type="button" role="option" data-value="dark">深色</button>
+                  </div>
+                </div>
+              </div>
               <label class="settings-row settings-font-row">
                 <span><strong>终端字号</strong><small>即时调整所有标签的文字和终端布局</small></span>
                 <span class="font-size-control">
@@ -187,6 +213,12 @@
                     <button type="button" role="option" data-value="system">系统等宽</button>
                     <button type="button" role="option" data-value="jetbrains">JetBrains Mono</button>
                     <button type="button" role="option" data-value="cascadia">Cascadia Code</button>
+                    <button type="button" role="option" data-value="fira">Fira Code</button>
+                    <button type="button" role="option" data-value="sourcecode">Source Code Pro</button>
+                    <button type="button" role="option" data-value="ibmplex">IBM Plex Mono</button>
+                    <button type="button" role="option" data-value="ubuntu">Ubuntu Mono</button>
+                    <button type="button" role="option" data-value="maple">Maple Mono</button>
+                    <button type="button" role="option" data-value="hack">Hack</button>
                   </div>
                 </div>
               </div>
@@ -272,6 +304,8 @@
                   <button type="button" role="option" data-value="connected">已连接</button>
                   <button type="button" role="option" data-value="idle">空闲</button>
                   <button type="button" role="option" data-value="protected">受保护</button>
+                  <button type="button" role="option" data-value="worker">原生 PTY</button>
+                  <button type="button" role="option" data-value="tmux-legacy">旧版 tmux</button>
                 </div>
               </div>
               <div id="session-manager-sort" class="custom-select" data-value="created-desc">
@@ -357,6 +391,18 @@
             </div>
           </section>
 
+          <section class="settings-panel" data-settings-panel="dependencies" hidden>
+            <header class="settings-panel-heading">
+              <span><h3>依赖检查</h3><p>运行时组件、终端能力和可选沙箱依赖</p></span>
+              <button id="refresh-dependencies" type="button">重新检查</button>
+            </header>
+            <div id="dependency-summary" class="dependency-summary">正在检查运行环境…</div>
+            <div id="dependency-grid" class="dependency-grid" aria-live="polite">
+              <div class="session-manager-loading">正在读取依赖状态…</div>
+            </div>
+            <p class="dependency-note">构建工具由部署前的 <code>scripts/check-env.sh</code> 检查；此处只展示正在运行的服务实际依赖。</p>
+          </section>
+
           <section class="settings-panel" data-settings-panel="snippets" hidden>
             <header class="settings-panel-heading">
               <span><h3>命令片段</h3><p>收藏常用命令，并发送到当前终端</p></span>
@@ -432,9 +478,6 @@
             <div class="security-section security-action-row">
               <span><strong>动态验证码</strong><small id="totp-status">正在读取状态…</small></span>
               <button id="enable-totp" type="button">启用</button>
-            </div>
-            <div class="settings-tools security-tools">
-              <button id="logout-session" class="settings-logout" type="button">退出当前设备</button>
             </div>
           </section>
 
@@ -573,6 +616,23 @@
     </div>
   </dialog>
 
+  <dialog id="logout-dialog" class="session-dialog logout-dialog" aria-labelledby="logout-dialog-title">
+    <div class="session-dialog-card">
+      <div class="dialog-heading">
+        <span class="dialog-mark logout-dialog-mark" aria-hidden="true"></span>
+        <div>
+          <h2 id="logout-dialog-title">退出当前设备？</h2>
+          <p>当前浏览器中的终端连接会断开，后台会话和正在运行的任务不会结束。</p>
+        </div>
+      </div>
+      <div class="logout-dialog-note">退出后需要重新完成登录验证才能再次访问终端。</div>
+      <div class="dialog-actions logout-dialog-actions">
+        <button id="logout-cancel" class="dialog-cancel" type="button">取消</button>
+        <button id="logout-session" class="dialog-primary danger" type="button">确认退出</button>
+      </div>
+    </div>
+  </dialog>
+
   <div id="terminal-search" class="terminal-search" hidden>
     <input id="terminal-search-input" type="search" placeholder="搜索当前终端…" autocomplete="off">
     <span id="terminal-search-status"></span>
@@ -589,11 +649,6 @@
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
 
   <div id="tab-session-popover" class="hover-popover tab-session-popover" role="tooltip" hidden></div>
-  <div id="health-monitor-popover" class="hover-popover health-monitor-popover" role="tooltip" hidden>
-    <header><span><i class="health-dot"></i><strong>服务健康</strong></span><small>正在读取…</small></header>
-    <div class="health-monitor-list"></div>
-    <footer>点击打开完整健康页面</footer>
-  </div>
 
   <script>/*__XTERM_JS__*/</script>
   <script>/*__FIT_JS__*/</script>

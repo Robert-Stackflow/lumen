@@ -134,11 +134,14 @@ static json_object *normalize_preferences(const char *json) {
   json_object *target = json_object_new_object();
   static const char *cursor_styles[] = {"bar", "block", "underline"};
   static const char *themes[] = {"dark", "light", "system"};
-  static const char *font_families[] = {"system", "jetbrains", "cascadia"};
+  static const char *font_families[] = {
+      "system", "jetbrains", "cascadia", "fira", "sourcecode",
+      "ibmplex", "ubuntu", "maple", "hack",
+  };
   bool valid = target &&
                add_boolean(source, target, "copySelection") &&
                add_integer(source, target, "fontSize", 11, 20) &&
-               add_string(source, target, "fontFamily", 16, font_families, 3) &&
+               add_string(source, target, "fontFamily", 16, font_families, 9) &&
                add_integer(source, target, "fontWeight", 300, 700) &&
                add_number(source, target, "letterSpacing", -1.0, 2.0) &&
                add_integer(source, target, "scrollback", 1000, 50000) &&

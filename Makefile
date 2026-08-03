@@ -55,6 +55,8 @@ check: build
 	test -x bin/lumen-pty
 	bin/lumen-pty --help >/dev/null
 	bash tests/supervisor.sh
+	bash tests/worker_migration.sh
+	bash tests/hybrid_migration.sh
 	bash tests/auth_sessions.sh
 	bash tests/deployment_contract.sh
 

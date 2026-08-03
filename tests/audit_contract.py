@@ -25,9 +25,13 @@ def main() -> None:
     assert 'data-settings-tab="audit"' in page
     assert 'id="audit-retention-policy"' in page
     assert '\\"websocket\\"' in http and '\\"usedBytes\\"' in http
-    assert 'sessions ? "ok" : "idle", sessions' in http
-    assert "PTY supervisor 校验" in app
+    assert 'legacy_sessions ? "ok" : "idle", legacy_sessions' in http
+    assert "个旧版 tmux 会话" in app
+    assert '\\"workerSessions\\"' in http
+    assert '\\"legacySessions\\"' in http
     assert '\\"latencyMs\\"' in http
+    assert '\\"dependencies\\"' in http
+    assert '\\"bubblewrap\\"' in http
     assert "credentials: 'same-origin'" in app
     print("audit log API and UI contract passed")
 

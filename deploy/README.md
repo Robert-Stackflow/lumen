@@ -5,10 +5,9 @@ OpenResty is used on the current host only as the TLS/WebSocket proxy; it is
 not a runtime dependency of Lumen.
 
 The systemd deployment separates the short-lived web transport, the
-`lumen-pty` supervisor identity, the unprivileged shell identity, and an
-explicitly gated root supervisor. The
-installer starts but never restarts the PTY supervisor during ordinary
-updates, so restarting Lumen's HTTP/WebSocket layer does not terminate work.
+`lumen-pty` broker identity, per-session PTY workers, the unprivileged shell
+identity, and an explicitly gated root broker. Restarting the Web layer or a
+broker does not terminate work held by a worker.
 
 ## Public HTTPS behind a local proxy
 
@@ -79,12 +78,28 @@ mkdir -p -m 0700 "$(dirname "$LUMEN_PTY_SOCKET")"
 Pass `/opt/lumen-terminal/bin/lumen-pty` as ttyd's command and include
 `--url-arg`; each short-lived attach process discovers the supervisor through
 `LUMEN_PTY_SOCKET`. The web process may be replaced independently and must not
-own the supervisor.
+own the broker or its workers. A non-systemd supervisor must stop only the
+broker process during a restart, not its surviving worker descendants.
 
 When upgrading from the old tmux architecture, the installer leaves the old
 service alive so active work is not destroyed. Verify the new web terminal,
 then run the installer once from SSH/console with
 `--replace-legacy-sessions` to remove that retired service.
+
+## Native worker migration
+
+New installations write `LUMEN_SESSION_BACKEND=worker` to
+`/etc/lumen-terminal/runtime.env`. Existing tmux sessions are discovered as
+`tmux-legacy`; their process trees are not moved or restarted. A new session ID
+creates a dedicated worker socket below `/run/lumen-terminal/sessions` or
+`/run/lumen-root-terminal/sessions` and connects directly to that worker.
+
+To temporarily roll back creation without touching existing workers, set
+`LUMEN_SESSION_BACKEND=tmux` in `runtime.env` and restart the two PTY brokers.
+Return it to `worker` the same way. Do not remove tmux while either session API
+reports `backend: tmux-legacy`. The older `--replace-legacy-sessions` installer
+flag concerns the retired standalone `lumen-session.service`; it does not end
+embedded legacy sessions.
 
 ## Privilege policy
 
@@ -94,7 +109,8 @@ therefore remain the configured non-root account; an explicit persisted
 setting can change the `+` action to request a gated root session.
 
 The tab-strip menu has a separate “new root session” action. Root access uses
-`/run/lumen-root-terminal/pty.sock` and tmux label `lumen-root`; the settings
+`/run/lumen-root-terminal/pty.sock` and isolated root workers; legacy root
+sessions remain discoverable through tmux label `lumen-root`. The settings
 page controls whether creation and attach require fresh TOTP or WebAuthn
 verification. Verification is enabled by default. The initial limit and idle
 policy come from `LUMEN_ROOT_MAX_SESSIONS` and

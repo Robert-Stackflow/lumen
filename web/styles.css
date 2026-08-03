@@ -284,20 +284,20 @@ a:focus-visible {
   width: max-content;
   min-width: 168px;
   max-width: 280px;
-  height: 38px;
+  height: 36px;
   padding: 0 8px 0 11px;
   overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 10px;
+  border: 0;
+  border-radius: 8px;
+  outline: 0;
   background: transparent;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 78%, var(--subtle));
   cursor: default;
   scroll-snap-align: nearest;
   transition:
     color 130ms ease,
     background-color 130ms ease,
-    border-color 130ms ease,
-    box-shadow 130ms ease;
+    opacity 130ms ease;
 }
 
 .tab-protection {
@@ -322,20 +322,11 @@ a:focus-visible {
   stroke-width: 1.7;
 }
 
-.terminal-tab.is-protected {
-  border-color: color-mix(in srgb, var(--green) 20%, var(--border));
-}
-
-.terminal-tab.is-pinned {
-  border-color: color-mix(in srgb, var(--blue) 24%, var(--border));
-}
-
 .terminal-tab.is-readonly .tab-name::after {
   margin-left: 6px;
-  padding: 2px 4px;
+  padding: 2px 4px 1px;
   border-radius: 4px;
-  border: 1px solid color-mix(in srgb, var(--yellow) 30%, transparent);
-  background: color-mix(in srgb, var(--yellow) 10%, transparent);
+  background: color-mix(in srgb, var(--yellow) 8%, transparent);
   color: color-mix(in srgb, var(--yellow) 82%, var(--text));
   content: "只读";
   font: 650 8px/1 ui-sans-serif, sans-serif;
@@ -347,13 +338,12 @@ a:focus-visible {
 
 .tab-connections {
   flex: 0 0 auto;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border: 1px solid color-mix(in srgb, var(--blue) 25%, var(--border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--blue) 9%, transparent);
-  color: var(--blue);
+  min-width: 14px;
+  height: 16px;
+  padding: 0 3px;
+  border: 0;
+  background: transparent;
+  color: var(--subtle);
   font: 600 9px/16px ui-monospace, "SFMono-Regular", monospace;
   text-align: center;
 }
@@ -362,41 +352,27 @@ a:focus-visible {
   display: none;
 }
 
-.terminal-tab::after {
-  position: absolute;
-  right: 12px;
-  bottom: -1px;
-  left: 12px;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
-  background: transparent;
-  content: "";
-  transition: background-color 130ms ease, box-shadow 130ms ease;
-}
-
 .terminal-tab:hover {
-  border-color: color-mix(in srgb, var(--border) 68%, transparent);
-  background: color-mix(in srgb, var(--surface-hover) 72%, transparent);
+  background: color-mix(in srgb, var(--surface-hover) 68%, transparent);
   color: var(--text);
 }
 
 .terminal-tab[aria-selected="true"] {
-  border-color: var(--border-strong);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-active) 94%, white),
-      var(--surface-active)
-    );
+  background: color-mix(in srgb, var(--surface-active) 78%, transparent);
   color: var(--text-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    0 4px 16px rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border-strong) 72%, transparent);
 }
 
-.terminal-tab[aria-selected="true"]::after {
-  background: color-mix(in srgb, var(--blue) 82%, var(--mauve));
-  box-shadow: 0 -2px 10px color-mix(in srgb, var(--blue) 18%, transparent);
+.terminal-tab:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--blue), 0 0 0 2px var(--focus-ring);
+}
+
+.terminal-tab[data-state="connecting"]:not([aria-selected="true"]) {
+  color: color-mix(in srgb, var(--yellow) 42%, var(--muted));
+}
+
+.terminal-tab[data-state="offline"]:not([aria-selected="true"]) {
+  color: color-mix(in srgb, var(--red) 44%, var(--muted));
 }
 
 .connection-dot {
@@ -411,9 +387,7 @@ a:focus-visible {
 
 .terminal-tab[data-state="online"] .connection-dot {
   background: var(--green);
-  box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--green) 10%, transparent),
-    0 0 8px color-mix(in srgb, var(--green) 22%, transparent);
+  box-shadow: none;
 }
 
 .terminal-tab[data-state="connecting"] .connection-dot {
@@ -423,7 +397,7 @@ a:focus-visible {
 
 .terminal-tab[data-state="offline"] .connection-dot {
   background: var(--red);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 9%, transparent);
+  box-shadow: none;
 }
 
 @keyframes pulse {
@@ -484,6 +458,14 @@ a:focus-visible {
 
 .latency[data-quality="poor"] {
   color: var(--red);
+}
+
+.terminal-tab:not([aria-selected="true"]):not(:hover) .latency {
+  color: var(--subtle);
+}
+
+.terminal-tab[aria-selected="true"] .tab-connections {
+  color: var(--muted);
 }
 
 .close-tab {
@@ -592,31 +574,6 @@ a:focus-visible {
   padding: 0;
 }
 
-#settings-toggle,
-#health-monitor-toggle {
-  position: relative;
-}
-
-#health-monitor-toggle::after {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  width: 7px;
-  height: 7px;
-  border: 2px solid var(--chrome-solid);
-  border-radius: 50%;
-  background: var(--green);
-  content: "";
-}
-
-#health-monitor-toggle[data-health-status="warning"]::after {
-  background: var(--yellow);
-}
-
-#health-monitor-toggle[data-health-status="critical"]::after {
-  background: var(--red);
-}
-
 .hover-popover {
   --popover-bg: color-mix(in srgb, var(--chrome-solid) 97%, transparent);
   --popover-arrow-x: 50%;
@@ -682,8 +639,7 @@ a:focus-visible {
   display: none;
 }
 
-.tab-session-popover header,
-.health-monitor-popover header {
+.tab-session-popover header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -692,22 +648,18 @@ a:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.tab-session-popover header span,
-.health-monitor-popover header span {
+.tab-session-popover header span {
   display: flex;
   align-items: center;
   gap: 7px;
 }
 
-.tab-session-popover header strong,
-.health-monitor-popover header strong {
+.tab-session-popover header strong {
   font-size: 12px;
   font-weight: 650;
 }
 
-.tab-session-popover header small,
-.health-monitor-popover header small,
-.health-monitor-popover footer {
+.tab-session-popover header small {
   color: var(--muted);
   font-size: 10px;
 }
@@ -766,51 +718,6 @@ a:focus-visible {
   white-space: nowrap;
 }
 
-.health-monitor-list {
-  display: grid;
-  gap: 2px;
-  margin: 8px 0;
-}
-
-.health-monitor-row {
-  display: grid;
-  grid-template-columns: 8px 78px minmax(0, 1fr);
-  align-items: center;
-  gap: 7px;
-  min-height: 25px;
-  font-size: 10px;
-}
-
-.health-monitor-row strong {
-  font-weight: 600;
-}
-
-.health-monitor-row small {
-  overflow: hidden;
-  color: var(--muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.health-monitor-row[data-status="warning"] .health-dot,
-.health-monitor-popover header[data-status="warning"] .health-dot {
-  background: var(--yellow);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--yellow) 10%, transparent);
-}
-
-.health-monitor-row[data-status="critical"] .health-dot,
-.health-monitor-row[data-status="error"] .health-dot,
-.health-monitor-popover header[data-status="critical"] .health-dot {
-  background: var(--red);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 10%, transparent);
-}
-
-.health-monitor-popover footer {
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  text-align: center;
-}
-
 .icon-button:hover,
 .add-button:hover {
   border-color: var(--border-strong);
@@ -829,15 +736,15 @@ a:focus-visible {
   stroke-width: 1.7;
 }
 
+.theme-icon-system,
+.theme-icon-sun,
 .theme-icon-moon {
   display: none;
 }
 
-:root[data-theme="light"] .theme-icon-sun {
-  display: none;
-}
-
-:root[data-theme="light"] .theme-icon-moon {
+.icon-button[data-theme-preference="system"] .theme-icon-system,
+.icon-button[data-theme-preference="light"] .theme-icon-sun,
+.icon-button[data-theme-preference="dark"] .theme-icon-moon {
   display: block;
 }
 
@@ -1507,6 +1414,16 @@ a:focus-visible {
   background: color-mix(in srgb, var(--blue) 20%, var(--chrome-raised));
 }
 
+.dialog-primary.danger {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  background: color-mix(in srgb, var(--red) 11%, var(--chrome-raised));
+  color: var(--red);
+}
+
+.dialog-primary.danger:hover {
+  background: color-mix(in srgb, var(--red) 17%, var(--chrome-raised));
+}
+
 .dialog-primary:disabled {
   opacity: 0.5;
   cursor: wait;
@@ -1514,6 +1431,39 @@ a:focus-visible {
 
 .passkey-action-dialog {
   width: min(430px, calc(100vw - 32px));
+}
+
+.logout-dialog {
+  width: min(430px, calc(100vw - 32px));
+}
+
+.logout-dialog-mark {
+  background: var(--red);
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--red) 10%, transparent),
+    0 0 18px color-mix(in srgb, var(--red) 16%, transparent);
+}
+
+.logout-dialog-note {
+  margin-top: 18px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 64%, transparent);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.logout-dialog-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.logout-dialog-actions .dialog-cancel,
+.logout-dialog-actions .dialog-primary {
+  width: 100%;
+  height: 38px;
+  margin: 0;
 }
 
 .terminal-mount.is-privileged-locked {
@@ -1695,20 +1645,14 @@ a:focus-visible {
   }
 }
 
-.terminal-tab.is-privileged {
-  border-color: color-mix(in srgb, var(--red) 35%, var(--border));
-  background: color-mix(in srgb, var(--red) 5%, var(--chrome-raised));
-}
-
 .root-badge,
 .session-root-badge {
   display: inline-flex;
   align-items: center;
   min-height: 16px;
   padding: 0 5px;
-  border: 1px solid color-mix(in srgb, var(--red) 42%, transparent);
   border-radius: 4px;
-  background: color-mix(in srgb, var(--red) 12%, transparent);
+  background: color-mix(in srgb, var(--red) 9%, transparent);
   color: var(--red);
   font: 700 9px/1 ui-monospace, "SFMono-Regular", monospace;
   letter-spacing: .05em;
@@ -1820,10 +1764,31 @@ a:focus-visible {
 .settings-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 14px;
   padding: 16px 12px;
+  overflow-y: auto;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--chrome-raised) 46%, transparent);
+}
+
+.settings-sidebar-group {
+  display: grid;
+  gap: 3px;
+}
+
+.settings-sidebar-group + .settings-sidebar-group {
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+}
+
+.settings-sidebar-label {
+  padding: 0 10px 5px;
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .08em;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .settings-sidebar button {
@@ -2017,6 +1982,15 @@ a:focus-visible {
   position: relative;
   z-index: 1;
   width: 126px;
+}
+
+#setting-font-family {
+  width: 184px;
+}
+
+#setting-font-family .custom-select-menu {
+  max-height: 292px;
+  overflow-y: auto;
 }
 
 .custom-select.is-open {
@@ -2264,14 +2238,6 @@ a:focus-visible {
   text-align: center;
 }
 
-.settings-tools {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 9px;
-  margin-top: 15px;
-}
-
-.settings-tools button,
 .session-manager-row button,
 .security-section button {
   height: 34px;
@@ -2390,23 +2356,6 @@ a:focus-visible {
   color: var(--text);
 }
 
-.security-tools {
-  grid-template-columns: 1fr;
-}
-
-.settings-tools .settings-logout {
-  grid-column: 1 / -1;
-  border-color: color-mix(in srgb, var(--red) 18%, var(--border));
-  background: transparent;
-  color: var(--red);
-}
-
-.settings-tools .settings-logout:hover {
-  border-color: color-mix(in srgb, var(--red) 38%, var(--border));
-  background: color-mix(in srgb, var(--red) 8%, transparent);
-}
-
-.settings-tools button:hover,
 .session-manager-row button:hover,
 .security-section button:hover {
   border-color: color-mix(in srgb, var(--blue) 45%, var(--border));
@@ -3041,6 +2990,79 @@ a:focus-visible {
   gap: 10px;
 }
 
+.dependency-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.dependency-summary {
+  margin: -4px 0 12px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.dependency-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 11px;
+  min-height: 58px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 58%, transparent);
+}
+
+.dependency-card > span {
+  display: grid;
+  gap: 4px;
+}
+
+.dependency-card strong {
+  color: var(--text-strong);
+  font-size: 11px;
+  font-weight: 610;
+}
+
+.dependency-card small,
+.dependency-note {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.dependency-card b {
+  color: var(--green);
+  font-size: 10px;
+}
+
+.dependency-card[data-status="warning"] b {
+  color: var(--yellow);
+}
+
+.dependency-card[data-status="warning"] .health-dot {
+  background: var(--yellow);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--yellow) 10%, transparent);
+}
+
+.dependency-card[data-status="error"] b {
+  color: var(--red);
+}
+
+.dependency-card[data-status="error"] .health-dot {
+  background: var(--red);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 10%, transparent);
+}
+
+.dependency-note {
+  margin: 14px 2px 0;
+  line-height: 1.55;
+}
+
+.dependency-note code {
+  color: var(--text);
+  font-family: ui-monospace, "SFMono-Regular", monospace;
+}
+
 .service-health-summary {
   margin: -4px 0 12px;
   color: var(--muted);
@@ -3154,7 +3176,9 @@ a:focus-visible {
 
 .session-count-badge,
 .current-connection-badge,
-.session-protected-badge {
+.session-protected-badge,
+.session-root-policy-badge,
+.session-legacy-badge {
   flex: none;
   padding: 3px 6px;
   border-radius: 999px;
@@ -3164,9 +3188,28 @@ a:focus-visible {
   letter-spacing: 0;
 }
 
+.legacy-backend-badge {
+  flex: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--yellow) 9%, transparent);
+  color: color-mix(in srgb, var(--yellow) 78%, var(--text));
+  font: 700 8px/1 ui-sans-serif, sans-serif;
+}
+
+.session-legacy-badge {
+  background: color-mix(in srgb, var(--yellow) 10%, transparent);
+  color: color-mix(in srgb, var(--yellow) 82%, var(--text));
+}
+
 .session-protected-badge {
   background: color-mix(in srgb, var(--green) 10%, transparent);
   color: var(--green);
+}
+
+.session-root-policy-badge {
+  background: color-mix(in srgb, var(--yellow) 11%, transparent);
+  color: color-mix(in srgb, var(--yellow) 82%, var(--text));
 }
 
 .session-manager-row button {
@@ -3472,6 +3515,22 @@ a:focus-visible {
     border-right: 0;
     border-bottom: 1px solid var(--border);
     scrollbar-width: none;
+  }
+
+  .settings-sidebar-group {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 4px;
+  }
+
+  .settings-sidebar-group + .settings-sidebar-group {
+    padding: 0 0 0 8px;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+  }
+
+  .settings-sidebar-label {
+    display: none;
   }
 
   .settings-sidebar::-webkit-scrollbar {

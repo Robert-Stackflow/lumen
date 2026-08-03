@@ -8,7 +8,8 @@
     "required": [
       "id", "pid", "clients", "historyBytes", "historyTruncated",
       "rows", "columns", "createdAt", "foregroundPid", "foregroundCommand",
-      "workingDirectory", "memoryKb", "cpuPercent", "lastActivityAt", "protected", "connections"
+      "workingDirectory", "memoryKb", "cpuPercent", "lastActivityAt", "protected",
+      "privileged", "backend", "connections"
     ],
     "additionalProperties": false,
     "properties": {
@@ -27,6 +28,8 @@
       "cpuPercent": { "type": "number", "minimum": 0 },
       "lastActivityAt": { "type": "integer", "minimum": 0 },
       "protected": { "type": "boolean" },
+      "privileged": { "type": "boolean" },
+      "backend": { "enum": ["worker", "tmux-legacy"] },
       "connections": {
         "type": "array",
         "items": {

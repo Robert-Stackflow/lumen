@@ -23,6 +23,7 @@ listen_port="7681"
 check_installed="false"
 listen_explicit="false"
 port_explicit="false"
+installed_backend=""
 
 if (($#)) && [[ "$1" != -* ]]; then shell_user="$1"; shift; fi
 if (($#)) && [[ "$1" != -* ]]; then allowed_host="$1"; shift; fi
@@ -49,6 +50,7 @@ if [[ "$check_installed" == "true" && -r /etc/lumen-terminal/runtime.env ]]; the
   if [[ "$port_explicit" != "true" ]]; then
     listen_port="$(sed -n 's/^LUMEN_PORT=//p' /etc/lumen-terminal/runtime.env | tail -n 1)"
   fi
+  installed_backend="$(sed -n 's/^LUMEN_SESSION_BACKEND=//p' /etc/lumen-terminal/runtime.env | tail -n 1)"
 fi
 
 failures=0
@@ -58,6 +60,14 @@ warn() { printf '  [WARN] %s\n' "$*"; warnings=$((warnings + 1)); }
 fail() { printf '  [FAIL] %s\n' "$*"; failures=$((failures + 1)); }
 
 printf 'Lumen environment check\n\n'
+
+if [[ "$check_installed" == "true" ]]; then
+  if [[ "$installed_backend" == "worker" || "$installed_backend" == "tmux" ]]; then
+    pass "New-session backend is configured: $installed_backend"
+  else
+    fail "LUMEN_SESSION_BACKEND is missing or invalid"
+  fi
+fi
 
 if [[ -r /etc/os-release ]]; then
   # shellcheck disable=SC1091

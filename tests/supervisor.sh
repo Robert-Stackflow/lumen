@@ -2,6 +2,7 @@
 set -euo pipefail
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+export LUMEN_SESSION_BACKEND=tmux
 test_root="$(mktemp -d)"
 socket_path="$test_root/pty.sock"
 server_log="$test_root/server.log"

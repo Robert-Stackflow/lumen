@@ -27,6 +27,18 @@ require(
     "live theme changes must update the terminal contrast policy",
 )
 require(
-    "applyTheme(currentTheme === 'dark' ? 'light' : 'dark', true, true)",
-    "manual theme changes must restore terminal focus for TUI color re-query",
+    "const next = { system: 'light', light: 'dark', dark: 'system' }[preference]",
+    "the header theme button must cycle through device, light, and dark themes",
+)
+require(
+    "followsSystemTheme = preference === 'system'",
+    "appearance settings must support following the device theme",
+)
+require(
+    "themeButton.dataset.themePreference = preference",
+    "the header theme icon must reflect the selected preference",
+)
+require(
+    "session.term.options.cursorBlink = false",
+    "cursor blink changes must restart the xterm cursor timer",
 )

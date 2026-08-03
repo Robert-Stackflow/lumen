@@ -1,9 +1,10 @@
 # Lumen Terminal
 
 Lumen 是一个面向个人设备的轻量 Web terminal。界面采用克制的
-Ghostty 风格；后端基于精简的 ttyd C/libuv 服务；每个浏览器标签连接
-一个由 Lumen 管理、由 tmux 承载的持久 PTY。Web 与 PTY 管理进程都可独立
-更新或重启，真实 shell 和后台任务仍会保留。
+Ghostty 风格；后端基于精简的 ttyd C/libuv 服务。新会话由独立的 Lumen
+PTY worker 直接持有真实 PTY，不再经过第二层终端模拟器；迁移前已经存在的
+tmux 会话会继续保留到其中的 shell 自然结束。Web、会话 broker 和 worker
+都可独立更新或重启，真实 shell 和后台任务仍会保留。
 
 ## 功能
 
@@ -14,7 +15,7 @@ Ghostty 风格；后端基于精简的 ttyd C/libuv 服务；每个浏览器标�
 - 原生 xterm.js 鼠标、滚动和选择，并通过安全的 OSC 52 桥接到访问设备的系统剪贴板。
 - 约束明确的 C PTY supervisor；Web 层更新、关闭网页或断网都不会终止任务。
 - 关闭标签时明确选择“仅断开”或“结束会话并释放资源”。
-- 可选 root 特权会话：独立 socket/tmux、每次连接二次验证、醒目标识与完整审计。
+- 可选 root 特权会话：独立 socket/worker、每次连接二次验证、醒目标识与完整审计。
 - 手机快捷键栏，以及中文系统字体和 IME 兼容。
 - 单文件前端，无 CDN、外部字体、常驻 Node、数据库或 Docker。
 
@@ -204,9 +205,17 @@ sudo ./scripts/install.sh ubuntu terminal.example.com \
 `lumen-pty.service`（PTY、shell、Codex）。正常更新只重启前者；
 浏览器会自动重连，后者及其中的任务不会中断。因此可以从 Lumen 内运行
 Codex 修改并重新安装 Lumen，而不需要依赖 Codex 的恢复功能。
-显式重启 `lumen-pty.service` 也不会结束其中的程序；新进程会重新发现 tmux
-中的 Lumen 会话。只有在界面结束会话、shell 自行退出或主动清理 tmux 会话时
-才会终止任务。
+显式重启 `lumen-pty.service` 也不会结束其中的程序：原生 worker 继续持有
+PTY 和活动连接，新 broker 会重新发现它们；迁移中的旧会话则从隔离的 tmux
+server 重新发现。只有在界面结束会话、shell 自行退出或整台主机重启时才会
+终止任务。
+
+`LUMEN_SESSION_BACKEND=worker` 控制新会话使用独立 worker；这是新安装和升级的
+默认值。需要回滚新建行为时可以在 `/etc/lumen-terminal/runtime.env` 改为
+`tmux` 并重启两个 PTY broker，已经运行的 worker 不会被结束。会话 API 的
+`backend` 字段以及设置页的“旧版 tmux”标记可用于观察迁移进度。只有普通和
+root 会话列表中的 `tmux-legacy` 数量都为零后，才可以从服务参数和系统依赖中
+彻底移除 tmux。
 
 从旧 tmux 架构首次迁移时，安装器会先启动新的 PTY supervisor，同时保留
 旧服务，避免杀掉其中仍在运行的任务。验证新终端后，从 SSH/控制台执行一次：
@@ -324,7 +333,7 @@ Codex 的 `/theme` 只选择代码语法高亮主题；输入栏等主界面颜�
 - 闲置标签不会预先创建；常规 UI 按需使用 `main`、`term-2` 至 `term-16`。
 - 浏览器保留 5,000 行 scrollback；supervisor 为每个会话保留 2 MiB
   原始输出用于重连，可用 `--history-bytes` 和 `--max-sessions` 调整。
-- 没有客户端时 supervisor 仍持续排空 PTY，避免后台任务被输出阻塞；
+- 没有客户端时独立 worker 仍持续排空 PTY，避免后台任务被输出阻塞；
   其本身没有 Node、数据库、容器或终端渲染器。
 - 前端在大量输出时会暂停 PTY 读取，等 xterm.js 消化后恢复。
 - WebGL 不可用或上下文丢失时自动退回 xterm.js DOM 渲染。

@@ -516,7 +516,7 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "pointer-events:none}.wrap{position:relative;z-index:1;width:min(100%%,400px)}.brand{display:flex;"
       "align-items:center;gap:11px;margin:0 0 18px 4px}.brand-copy{display:grid;gap:4px}.brand strong{color:"
       "var(--strong);font:650 12px/1 ui-monospace,\"SFMono-Regular\",Menlo,monospace;letter-spacing:.08em;"
-      "text-transform:uppercase}.brand small{color:var(--muted);font-size:10px;letter-spacing:.04em}.mark{position:"
+      "text-transform:uppercase}.mark{position:"
       "relative;width:24px;height:24px;border-radius:8px;background:linear-gradient(145deg,var(--hover),var(--field));"
       "box-shadow:inset 0 0 0 1px var(--line),0 5px 16px var(--shadow)}.mark:before{content:\"\";position:absolute;"
       "left:7px;top:7px;width:6px;height:6px;border-right:2px solid var(--green);border-bottom:2px solid var(--green);"
@@ -524,12 +524,8 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "border-radius:2px;background:var(--green);box-shadow:0 0 8px color-mix(in srgb,var(--green) 35%%,transparent)}"
       ".card{padding:30px;border:1px solid var(--line);border-radius:18px;background:color-mix(in srgb,var(--card) "
       "96%%,transparent);box-shadow:0 26px 80px var(--shadow),inset 0 1px 0 rgba(255,255,255,.025);"
-      "backdrop-filter:blur(22px) saturate(120%%)}.eyebrow{display:flex;align-items:center;gap:7px;margin:0 0 13px;"
-      "color:var(--muted);font:600 10px/1 ui-monospace,\"SFMono-Regular\",Menlo,monospace;letter-spacing:.08em;"
-      "text-transform:uppercase}.eyebrow:before{content:\"\";width:6px;height:6px;border-radius:50%%;background:"
-      "var(--green);box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 10%%,transparent)}h1{margin:0;color:"
-      "var(--strong);font-size:22px;line-height:1.3;font-weight:680;letter-spacing:-.035em}p{margin:7px 0 25px;"
-      "color:var(--muted);font-size:13px;line-height:1.65}label{display:block;margin:0 0 7px;color:var(--muted);"
+      "backdrop-filter:blur(22px) saturate(120%%)}h1{margin:0 0 25px;color:"
+      "var(--strong);font-size:22px;line-height:1.3;font-weight:680;letter-spacing:-.035em}label{display:block;margin:0 0 7px;color:var(--muted);"
       "font-size:12px;font-weight:520}input{width:100%%;height:44px;margin:0 0 17px;padding:0 13px;border:1px solid "
       "var(--line);border-radius:10px;outline:none;background:var(--field);color:var(--strong);font:500 14px/1 "
       "ui-monospace,\"SFMono-Regular\",\"Cascadia Code\",Menlo,monospace;transition:border-color .14s,box-shadow .14s,"
@@ -544,13 +540,11 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "brightness(1.045)}button:active{transform:scale(.992)}button:disabled{opacity:.55;cursor:not-allowed}.error{"
       "display:none;margin:-2px 0 17px;padding:10px 11px;border:1px solid color-mix(in srgb,var(--red) 28%%,"
       "transparent);border-radius:9px;background:color-mix(in srgb,var(--red) 8%%,transparent);color:var(--red);"
-      "font-size:12px;line-height:1.5}.error-visible{display:block}.note{margin:17px 2px 0;text-align:center;color:"
-      "var(--muted);font-size:11px;line-height:1.6}@media(max-width:480px){body{padding:18px}.card{padding:25px 21px}}"
+      "font-size:12px;line-height:1.5}.error-visible{display:block}@media(max-width:480px){body{padding:18px}.card{padding:25px 21px}}"
       "@media(prefers-reduced-motion:reduce){*{transition-duration:.01ms!important}}</style></head><body>"
       "<main class=\"wrap\"><div class=\"brand\"><span class=\"mark\" aria-hidden=\"true\"></span>"
-      "<span class=\"brand-copy\"><strong>lumen</strong><small>persistent web terminal</small></span></div>"
-      "<section class=\"card\"><div class=\"eyebrow\">Secure session</div><h1>继续你的终端</h1>"
-      "<p>登录后，此设备会安全地保持会话，回来即可继续工作。</p>"
+      "<span class=\"brand-copy\"><strong>lumen</strong></span></div>"
+      "<section class=\"card\"><h1>继续你的终端</h1>"
       "<form method=\"post\" action=\"%s/auth/login\" autocomplete=\"on\"><input type=\"hidden\" name=\"csrf\" "
       "value=\"%s\"><label for=\"username\">账号</label><input id=\"username\" name=\"username\" type=\"text\" "
       "autocomplete=\"username\" autocapitalize=\"none\" spellcheck=\"false\" maxlength=\"64\" required "
@@ -559,7 +553,7 @@ static char *render_login(const char *csrf, const char *message, bool locked, si
       "</div>"
       "<button type=\"submit\"%s>%s</button></form><button id=\"passkey\"%s type=\"button\" style=\"margin-top:10px;"
       "background:transparent;color:var(--strong);border-color:var(--line);box-shadow:none\">使用通行密钥</button>"
-      "</section><div class=\"note\">安全会话仅保存在当前浏览器 · Lumen 不会保存明文密码</div></main>"
+      "</section></main>"
       "<script>const cv=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/').padEnd("
       "s.length+(4-s.length%%4)%%4,'=')),c=>c.charCodeAt(0));const vc=b=>btoa(String.fromCharCode(...new "
       "Uint8Array(b))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');document.getElementById("
@@ -983,10 +977,14 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         char *inventory = list_sessions(&inventory_len);
         clock_gettime(CLOCK_MONOTONIC, &pty_finished);
         if (!inventory) return send_empty(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL, NULL, NULL);
-        unsigned int sessions = 0, connections = 0;
+        unsigned int sessions = 0, connections = 0, worker_sessions = 0, legacy_sessions = 0;
         for (char *cursor = inventory; (cursor = strstr(cursor, "\"pid\":")); cursor += 6) sessions++;
         for (char *cursor = inventory; (cursor = strstr(cursor, "\"clients\":")); cursor += 10)
           connections += (unsigned int)strtoul(cursor + 10, NULL, 10);
+        for (char *cursor = inventory; (cursor = strstr(cursor, "\"backend\":\"worker\"")); cursor += 20)
+          worker_sessions++;
+        for (char *cursor = inventory; (cursor = strstr(cursor, "\"backend\":\"tmux-legacy\"")); cursor += 25)
+          legacy_sessions++;
         free(inventory);
         long long pty_latency_ms =
             (pty_finished.tv_sec - pty_started.tv_sec) * 1000LL
@@ -1024,22 +1022,59 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             (unsigned long long)disk_info.f_bavail * disk_info.f_frsize;
         unsigned long web_memory_kb =
             web_resident * (unsigned long)sysconf(_SC_PAGESIZE) / 1024;
-        char *body = malloc(768);
+        bool user_namespaces = false;
+        unsigned long user_namespace_limit = 0;
+        FILE *userns = fopen("/proc/sys/user/max_user_namespaces", "r");
+        if (userns) {
+          if (fscanf(userns, "%lu", &user_namespace_limit) == 1)
+            user_namespaces = user_namespace_limit > 0;
+          fclose(userns);
+        }
+        FILE *unprivileged_userns = fopen("/proc/sys/kernel/unprivileged_userns_clone", "r");
+        if (unprivileged_userns) {
+          unsigned int enabled = 0;
+          if (fscanf(unprivileged_userns, "%u", &enabled) == 1 && enabled == 0)
+            user_namespaces = false;
+          fclose(unprivileged_userns);
+        }
+        const char *shell_path = getenv("SHELL");
+        if (!shell_path || shell_path[0] != '/') shell_path = "/bin/bash";
+        bool pty_client_available = access("/opt/lumen-terminal/bin/lumen-pty", X_OK) == 0;
+        bool normal_socket_available = access("/run/lumen-terminal/pty.sock", R_OK | W_OK) == 0;
+        bool root_socket_available = access("/run/lumen-root-terminal/pty.sock", R_OK | W_OK) == 0;
+        bool tmux_available = access("/usr/bin/tmux", X_OK) == 0;
+        bool shell_available = access(shell_path, X_OK) == 0;
+        bool bubblewrap_available = access("/usr/bin/bwrap", X_OK) == 0 ||
+                                    access("/usr/local/bin/bwrap", X_OK) == 0;
+        char *body = malloc(1280);
         if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
-        int written = snprintf(body, 768,
+        int written = snprintf(body, 1280,
                                "{\"status\":\"ok\",\"version\":\"%s\","
                                "\"web\":{\"status\":\"ok\",\"uptimeSeconds\":%lld,\"memoryKb\":%lu},"
-                               "\"pty\":{\"status\":\"ok\",\"sessions\":%u,\"latencyMs\":%lld},"
+                               "\"pty\":{\"status\":\"ok\",\"sessions\":%u,\"workerSessions\":%u,"
+                               "\"legacySessions\":%u,\"latencyMs\":%lld},"
                                "\"websocket\":{\"status\":\"ok\",\"connections\":%u},"
                                "\"tmux\":{\"status\":\"%s\",\"sessions\":%u},"
                                "\"memory\":{\"usedBytes\":%llu,\"totalBytes\":%llu},"
-                               "\"disk\":{\"usedBytes\":%llu,\"totalBytes\":%llu}}",
+                               "\"disk\":{\"usedBytes\":%llu,\"totalBytes\":%llu},"
+                               "\"dependencies\":{\"ptyClient\":%s,\"normalPtySocket\":%s,"
+                               "\"rootPtySocket\":%s,\"tmux\":%s,\"shell\":%s,"
+                               "\"bubblewrap\":%s,\"userNamespaces\":%s,\"openssl\":true,"
+                               "\"websockets\":true,\"fido2\":true,\"qrencode\":true}}",
                                TTYD_VERSION, (long long)(time(NULL) - http_started_at),
-                               web_memory_kb, sessions, pty_latency_ms, connections,
-                               sessions ? "ok" : "idle", sessions,
+                               web_memory_kb, sessions, worker_sessions, legacy_sessions,
+                               pty_latency_ms, connections,
+                               legacy_sessions ? "ok" : "idle", legacy_sessions,
                                memory_total - memory_available, memory_total,
-                               disk_total - disk_available, disk_total);
-        if (written < 0 || written >= 768) {
+                               disk_total - disk_available, disk_total,
+                               pty_client_available ? "true" : "false",
+                               normal_socket_available ? "true" : "false",
+                               root_socket_available ? "true" : "false",
+                               tmux_available ? "true" : "false",
+                               shell_available ? "true" : "false",
+                               bubblewrap_available ? "true" : "false",
+                               user_namespaces ? "true" : "false");
+        if (written < 0 || written >= 1280) {
           free(body);
           return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
         }
@@ -1144,6 +1179,8 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
           operation = "--protect";
           audit_event = "session_protected";
         } else if (!strcmp(action, "unprotect") && action_request_valid(wsi, "unprotect")) {
+          if (privileged_session_id(session_id))
+            return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
           operation = "--unprotect";
           audit_event = "session_unprotected";
         } else {

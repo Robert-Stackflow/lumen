@@ -12,6 +12,7 @@ usage() {
   echo "  --history-bytes <bytes>          Reconnect replay per session (default: 2097152)"
   echo "  --ping-interval <seconds>        WebSocket keepalive (default: 15)"
   echo "  --idle-timeout <seconds>         Automatic reclaim timeout; 0 disables it (default: 0)"
+  echo "  --session-backend <worker|tmux>  Backend for newly created sessions (default: worker)"
   echo "  --root-max-sessions <count>      Privileged root sessions (default: 2)"
   echo "  --root-idle-timeout <seconds>    Root idle reclaim timeout (default: 1800)"
   echo "  --client-ip-header <header>      Trusted proxy client-IP header"
@@ -45,6 +46,7 @@ max_sessions="16"
 history_bytes="2097152"
 ping_interval="15"
 idle_timeout="0"
+session_backend="worker"
 root_max_sessions="2"
 root_idle_timeout="1800"
 client_ip_header=""
@@ -80,6 +82,10 @@ while (($#)); do
       ;;
     --idle-timeout)
       idle_timeout="${2:-}"
+      shift 2
+      ;;
+    --session-backend)
+      session_backend="${2:-}"
       shift 2
       ;;
     --root-max-sessions)
@@ -149,6 +155,10 @@ if [[ ! "$ping_interval" =~ ^[0-9]+$ ]] || ((ping_interval > 300)); then
 fi
 if [[ ! "$idle_timeout" =~ ^[0-9]+$ ]] || ((idle_timeout > 31536000)); then
   echo "Invalid idle timeout: $idle_timeout" >&2
+  exit 64
+fi
+if [[ "$session_backend" != "worker" && "$session_backend" != "tmux" ]]; then
+  echo "Invalid session backend: $session_backend" >&2
   exit 64
 fi
 if [[ ! "$root_max_sessions" =~ ^[0-9]+$ ]] ||
@@ -300,6 +310,7 @@ runtime_temp="$(mktemp "$security_dir/.runtime.XXXXXX")"
   printf 'LUMEN_PTY_HISTORY_BYTES=%s\n' "$history_bytes"
   printf 'LUMEN_PING_INTERVAL=%s\n' "$ping_interval"
   printf 'LUMEN_IDLE_SESSION_SECONDS=%s\n' "$idle_timeout"
+  printf 'LUMEN_SESSION_BACKEND=%s\n' "$session_backend"
   printf 'LUMEN_ROOT_MAX_SESSIONS=%s\n' "$root_max_sessions"
   printf 'LUMEN_ROOT_IDLE_SESSION_SECONDS=%s\n' "$root_idle_timeout"
 } >"$runtime_temp"

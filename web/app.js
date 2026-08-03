@@ -121,13 +121,13 @@
   const themeButton = document.getElementById('theme-toggle');
   const focusButton = document.getElementById('focus-toggle');
   const settingsButton = document.getElementById('settings-toggle');
-  const healthMonitorButton = document.getElementById('health-monitor-toggle');
-  const healthMonitorPopover = document.getElementById('health-monitor-popover');
+  const logoutToggleButton = document.getElementById('logout-toggle');
   const tabSessionPopover = document.getElementById('tab-session-popover');
   const settingsDialog = document.getElementById('settings-dialog');
   const copySelectionSetting = document.getElementById('setting-copy-selection');
   const fontSizeSetting = document.getElementById('setting-font-size');
   const fontSizeValue = document.getElementById('setting-font-size-value');
+  const themeSetting = document.getElementById('setting-theme');
   const fontFamilySetting = document.getElementById('setting-font-family');
   const fontWeightSetting = document.getElementById('setting-font-weight');
   const fontWeightValue = document.getElementById('setting-font-weight-value');
@@ -172,6 +172,8 @@
   const settingsTabs = [...document.querySelectorAll('[data-settings-tab]')];
   const settingsPanels = [...document.querySelectorAll('[data-settings-panel]')];
   const logoutSessionButton = document.getElementById('logout-session');
+  const logoutDialog = document.getElementById('logout-dialog');
+  const logoutCancelButton = document.getElementById('logout-cancel');
   const terminalSearch = document.getElementById('terminal-search');
   const terminalSearchInput = document.getElementById('terminal-search-input');
   const terminalSearchStatus = document.getElementById('terminal-search-status');
@@ -196,6 +198,9 @@
   const sessionSelectionCount = document.getElementById('session-selection-count');
   const serviceHealthGrid = document.getElementById('service-health-grid');
   const serviceHealthSummary = document.getElementById('service-health-summary');
+  const dependencyGrid = document.getElementById('dependency-grid');
+  const dependencySummary = document.getElementById('dependency-summary');
+  const refreshDependenciesButton = document.getElementById('refresh-dependencies');
   const commandSnippetList = document.getElementById('command-snippet-list');
   const commandSnippetEditor = document.getElementById('command-snippet-editor');
   const commandSnippetName = document.getElementById('command-snippet-name');
@@ -247,7 +252,6 @@
   let pendingForceTerminate = false;
   let websocketReconnectCount = 0;
   let latestHealthReport = null;
-  let latestHealthCards = [];
   let sessionActionPending = false;
   let pendingConnection = null;
   let contextMenuRestoreFocus = null;
@@ -311,7 +315,8 @@
         fontSize: Number.isInteger(saved?.fontSize) && saved.fontSize >= 11 && saved.fontSize <= 20
           ? saved.fontSize
           : defaults.fontSize,
-        fontFamily: ['system', 'jetbrains', 'cascadia'].includes(saved?.fontFamily)
+        fontFamily: ['system', 'jetbrains', 'cascadia', 'fira', 'sourcecode',
+          'ibmplex', 'ubuntu', 'maple', 'hack'].includes(saved?.fontFamily)
           ? saved.fontFamily : defaults.fontFamily,
         fontWeight: Number.isInteger(saved?.fontWeight) && saved.fontWeight >= 300 && saved.fontWeight <= 700
           ? saved.fontWeight : defaults.fontWeight,
@@ -744,6 +749,12 @@
       system: '"SFMono-Regular", "SF Mono", "Noto Sans Mono CJK SC", Menlo, Consolas, monospace',
       jetbrains: '"JetBrains Mono", "Maple Mono NF CN", "Noto Sans Mono CJK SC", monospace',
       cascadia: '"Cascadia Code", "Cascadia Mono", "Noto Sans Mono CJK SC", monospace',
+      fira: '"Fira Code", "Fira Mono", "Noto Sans Mono CJK SC", monospace',
+      sourcecode: '"Source Code Pro", "Noto Sans Mono CJK SC", monospace',
+      ibmplex: '"IBM Plex Mono", "Noto Sans Mono CJK SC", monospace',
+      ubuntu: '"Ubuntu Mono", "Noto Sans Mono CJK SC", monospace',
+      maple: '"Maple Mono NF CN", "Maple Mono", "Noto Sans Mono CJK SC", monospace',
+      hack: 'Hack, "Noto Sans Mono CJK SC", monospace',
     };
     return fontFamilies[settings.fontFamily] || fontFamilies.system;
   }
@@ -1366,6 +1377,12 @@
     rootBadge.textContent = 'ROOT';
     rootBadge.hidden = !session.privileged;
 
+    const legacyBadge = document.createElement('span');
+    legacyBadge.className = 'legacy-backend-badge';
+    legacyBadge.textContent = '旧';
+    legacyBadge.title = '此会话仍由旧版 tmux 承载，将在自然结束后退出迁移';
+    legacyBadge.hidden = true;
+
     const latency = document.createElement('span');
     latency.className = 'latency';
     latency.textContent = '···';
@@ -1390,7 +1407,7 @@
     close.innerHTML = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 3 6 6M9 3 3 9"/></svg>';
 
     tab.classList.toggle('is-privileged', session.privileged);
-    tab.append(dot, name, rootBadge, latency, connections, protection, close);
+    tab.append(dot, name, rootBadge, legacyBadge, latency, connections, protection, close);
     tab.addEventListener('click', event => {
       if (!event.target.closest('.close-tab, .tab-name-input')) activateSession(session.id);
     });
@@ -1494,6 +1511,7 @@
     const memory = Number(item?.memoryKb || 0);
     const details = [
       ['身份', session.privileged ? 'root · 特权会话' : 'ubuntu · 普通会话'],
+      ['会话后端', item?.backend === 'worker' ? '原生 PTY worker' : '旧版 tmux（迁移中）'],
       ['状态', session.state === 'online' ? '已连接' : session.state === 'connecting' ? '连接中' : '离线'],
       ['连接', `${Number(item?.clients || 0)} 个客户端`],
       ['运行时间', createdAt ? formatDuration(Date.now() - createdAt) : '等待后台数据'],
@@ -1501,7 +1519,7 @@
       ['内存', memory ? `${(memory / 1024).toFixed(memory >= 10240 ? 0 : 1)} MiB` : '—'],
       ['前台进程', item?.foregroundCommand || '—'],
       ['工作目录', item?.workingDirectory || session.currentWorkingDirectory || '—'],
-      ['保护', item?.protected ? '已保护' : '未保护'],
+      ['保护策略', session.privileged ? '不适用 · 强制空闲回收' : item?.protected ? '已保护' : '未保护'],
     ];
     tabSessionPopover.dataset.state = session.state;
     tabSessionPopover.innerHTML = '<header><span><i class="session-popover-dot"></i><strong></strong></span><small></small></header><div class="tab-session-details"></div>';
@@ -1985,6 +2003,11 @@
   }
 
   async function setSessionProtected(id, protectedSession, quiet = false) {
+    const inventoryItem = sessionInventory.find(item => item.id === id);
+    if (sessions.get(id)?.privileged || inventoryItem?.privileged === true) {
+      if (!quiet) showToast('root 会话不支持保护，并始终受空闲回收策略约束');
+      return;
+    }
     try {
       const response = await fetch(`${basePath}/api/sessions/${encodeURIComponent(id)}`, {
         method: 'POST',
@@ -2232,9 +2255,7 @@
       if (preferencesReady) schedulePreferencesSave();
     }
     document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#10111a' : '#eff1f5';
-    const nextTheme = theme === 'dark' ? '浅色' : '深色';
-    themeButton.title = `切换到${nextTheme}主题`;
-    themeButton.setAttribute('aria-label', `切换到${nextTheme}主题`);
+    syncThemeToggle();
     for (const session of sessions.values()) {
       session.term.options.minimumContrastRatio = TERM_MINIMUM_CONTRAST[theme];
       session.term.options.theme = TERM_THEMES[theme];
@@ -2257,6 +2278,28 @@
     }
   }
 
+  function syncThemeToggle() {
+    const preference = followsSystemTheme ? 'system' : currentTheme;
+    const labels = { system: '跟随设备', light: '浅色主题', dark: '深色主题' };
+    const next = { system: 'light', light: 'dark', dark: 'system' }[preference];
+    const description = `当前${labels[preference]}；切换到${labels[next]}`;
+    themeButton.dataset.themePreference = preference;
+    themeButton.title = description;
+    themeButton.setAttribute('aria-label', description);
+  }
+
+  function setThemePreference(preference, restoreTerminalFocus = true) {
+    followsSystemTheme = preference === 'system';
+    if (followsSystemTheme) localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, preference);
+    applyTheme(followsSystemTheme
+      ? systemThemeQuery.matches ? 'light' : 'dark'
+      : preference, false, restoreTerminalFocus);
+    setCustomSelect(themeSetting, preference);
+    preferencesDirty = true;
+    if (preferencesReady) schedulePreferencesSave();
+  }
+
   function applyFontSize(fontSize) {
     settings.fontSize = fontSize;
     fontSizeSetting.value = String(fontSize);
@@ -2275,7 +2318,6 @@
     scrollbackValue.value = `${settings.scrollback.toLocaleString()} 行`;
     for (const session of sessions.values()) {
       session.term.options.cursorStyle = settings.cursorStyle;
-      session.term.options.cursorBlink = settings.cursorBlink;
       session.term.options.lineHeight = settings.lineHeight;
       session.term.options.fontFamily = terminalFontFamily();
       session.term.options.fontWeight = String(settings.fontWeight);
@@ -2284,6 +2326,21 @@
       session.term.options.scrollback = settings.scrollback;
       session.webglAddon?.clearTextureAtlas();
       scheduleResize(session);
+    }
+    applyCursorBlink();
+  }
+
+  function applyCursorBlink() {
+    const enabled = settings.cursorBlink;
+    for (const session of sessions.values()) {
+      session.term.options.cursorBlink = false;
+      session.term.refresh(0, Math.max(0, session.term.rows - 1));
+      if (!enabled) continue;
+      requestAnimationFrame(() => {
+        if (session.destroyed || !settings.cursorBlink) return;
+        session.term.options.cursorBlink = true;
+        session.term.refresh(0, Math.max(0, session.term.rows - 1));
+      });
     }
   }
 
@@ -2375,12 +2432,11 @@
         action: () => setSessionPinned(session, !session.pinned),
       },
       { separator: true },
-      {
+      ...(!session.privileged ? [{
         label: session.protected ? '取消保护会话' : '保护会话',
         icon: session.protected ? 'unprotect' : 'protect',
-        disabled: session.privileged,
         action: () => void setSessionProtected(session.id, !session.protected),
-      },
+      }] : []),
       {
         label: session.readOnly ? '恢复终端输入' : '切换为只读',
         icon: session.readOnly ? 'writable' : 'readonly',
@@ -2539,12 +2595,15 @@
           session.privileged = item.privileged === true;
           privilegeStateChanged = true;
         }
-        session.protected = Boolean(item?.protected);
+        session.protected = !session.privileged && Boolean(item?.protected);
+        session.backend = item?.backend || 'tmux-legacy';
         session.tab.classList.toggle('is-privileged', session.privileged);
         const rootBadge = session.tab.querySelector('.root-badge');
         if (rootBadge) rootBadge.hidden = !session.privileged;
         session.tab.classList.toggle('is-protected', session.protected);
         session.tab.querySelector('.tab-protection').hidden = !session.protected;
+        const legacyBadge = session.tab.querySelector('.legacy-backend-badge');
+        if (legacyBadge) legacyBadge.hidden = session.backend !== 'tmux-legacy';
         session.connections.textContent = count > 9 ? '9+' : String(count);
         session.connections.hidden = count < 2;
         session.connections.title = `当前 ${count} 个连接`;
@@ -2578,7 +2637,9 @@
       const matchesStatus = sessionStatus === 'all'
         || sessionStatus === 'connected' && Number(item.clients) > 0
         || sessionStatus === 'idle' && Number(item.clients) === 0
-        || sessionStatus === 'protected' && item.protected;
+        || sessionStatus === 'protected' && item.protected
+        || sessionStatus === 'worker' && item.backend === 'worker'
+        || sessionStatus === 'tmux-legacy' && item.backend === 'tmux-legacy';
       return matchesQuery && matchesStatus;
     }).sort((left, right) => {
       if (sessionSort === 'created-asc') return Number(left.createdAt) - Number(right.createdAt);
@@ -2621,6 +2682,11 @@
         rootBadge.className = 'session-root-badge';
         rootBadge.textContent = 'ROOT';
         title.append(rootBadge);
+        const rootPolicyBadge = document.createElement('span');
+        rootPolicyBadge.className = 'session-root-policy-badge';
+        rootPolicyBadge.textContent = '强制回收';
+        rootPolicyBadge.title = 'root 会话不支持保护，并始终受空闲回收策略约束';
+        title.append(rootPolicyBadge);
       }
       const countBadge = document.createElement('span');
       countBadge.className = 'session-count-badge';
@@ -2632,9 +2698,16 @@
         protectedBadge.textContent = '受保护';
         title.append(protectedBadge);
       }
+      if (item.backend === 'tmux-legacy') {
+        const legacyBadge = document.createElement('span');
+        legacyBadge.className = 'session-legacy-badge';
+        legacyBadge.textContent = '旧版 tmux';
+        legacyBadge.title = '此会话会继续保留，直到其中的 shell 自然结束';
+        title.append(legacyBadge);
+      }
       const createdAt = Number(item.createdAt || 0) * 1000;
       copy.querySelector('small').textContent =
-        `${item.id} · 创建于 ${formatDateTime(createdAt)} · PID ${item.pid} · ${item.rows}×${item.columns}`;
+        `${item.id} · ${item.backend === 'worker' ? '原生 PTY' : '旧版 tmux'} · 创建于 ${formatDateTime(createdAt)} · PID ${item.pid} · ${item.rows}×${item.columns}`;
       const memory = Number(item.memoryKb || 0);
       copy.querySelector('.session-runtime').textContent = [
         item.foregroundCommand ? `前台 ${item.foregroundCommand} (${item.foregroundPid})` : '',
@@ -2683,12 +2756,6 @@
         settingsDialog.close();
         openSessionDialog(item.id, session?.name || item.id);
       });
-      const protect = document.createElement('button');
-      protect.type = 'button';
-      protect.textContent = item.protected ? '取消保护' : '保护';
-      protect.disabled = item.privileged === true;
-      if (protect.disabled) protect.title = 'root 会话始终受强制空闲回收策略约束';
-      protect.addEventListener('click', () => void setSessionProtected(item.id, !item.protected));
       const actions = document.createElement('span');
       actions.className = 'session-manager-actions';
       const copyInfo = document.createElement('button');
@@ -2706,7 +2773,15 @@
         ].join('\n');
         void writeSystemClipboard(text, true, true);
       });
-      actions.append(activate, copyInfo, protect, terminate);
+      actions.append(activate, copyInfo);
+      if (item.privileged !== true) {
+        const protect = document.createElement('button');
+        protect.type = 'button';
+        protect.textContent = item.protected ? '取消保护' : '保护';
+        protect.addEventListener('click', () => void setSessionProtected(item.id, !item.protected));
+        actions.append(protect);
+      }
+      actions.append(terminate);
       const connections = document.createElement('div');
       connections.className = 'session-connections';
       const connectionItems = Array.isArray(item.connections) ? item.connections : [];
@@ -2981,18 +3056,16 @@
       latestHealthReport = health;
       const cards = [
         { name: 'Web', status: health.web?.status, detail: `运行 ${formatDuration(Number(health.web?.uptimeSeconds || 0) * 1000)} · 内存 ${(Number(health.web?.memoryKb || 0) / 1024).toFixed(1)} MiB` },
-        { name: 'PTY', status: ptyStatus, detail: `${Number(health.pty?.sessions || 0)} 个会话 · 响应 ${ptyLatency} ms` },
+        { name: 'PTY', status: ptyStatus, detail: `${Number(health.pty?.workerSessions || 0)} 个原生 · ${Number(health.pty?.legacySessions || 0)} 个旧版 · 响应 ${ptyLatency} ms` },
         { name: 'WebSocket', status: websocketReconnectCount >= 20 ? 'critical' : websocketReconnectCount >= 5 ? 'warning' : health.websocket?.status, detail: `${Number(health.websocket?.connections || 0)} 个活动连接 · 本页重连 ${websocketReconnectCount} 次` },
-        { name: 'tmux', status: health.tmux?.status, detail: `${Number(health.tmux?.sessions || 0)} 个持久会话 · PTY supervisor 校验` },
+        { name: '迁移状态', status: health.tmux?.status, detail: `${Number(health.tmux?.sessions || 0)} 个旧版 tmux 会话${Number(health.tmux?.sessions || 0) ? '仍在自然运行' : ' · 已可移除 tmux'}` },
         { name: '主机内存', status: resourceStatus(memoryPercent), detail: `${formatResourceBytes(health.memory?.usedBytes)} / ${formatResourceBytes(health.memory?.totalBytes)}`, percent: memoryPercent },
         { name: '磁盘', status: diskStatus, detail: `${formatResourceBytes(health.disk?.usedBytes)} / ${formatResourceBytes(health.disk?.totalBytes)}`, percent: diskPercent },
       ];
-      latestHealthCards = cards;
       const severity = cards.some(card => card.status === 'critical' || card.status === 'error')
         ? 'critical' : cards.some(card => card.status === 'warning') ? 'warning' : 'ok';
       settingsButton.classList.toggle('has-health-warning', severity !== 'ok');
       settingsButton.dataset.healthStatus = severity;
-      healthMonitorButton.dataset.healthStatus = severity;
       serviceHealthSummary.textContent =
         `${severity === 'ok' ? '所有服务正常' : severity === 'warning' ? '检测到资源预警' : '检测到服务异常'} · 每 3 秒自动刷新`
         + (recentError ? ` · 最近异常 ${formatDateTime(recentError.timestamp)}` : '');
@@ -3011,42 +3084,51 @@
             : cardData.status === 'warning' ? '预警' : '异常';
         return card;
       }));
-      if (!healthMonitorPopover.hidden) renderHealthMonitorPopover();
+      renderDependencyChecks(health.dependencies || {});
     } catch (error) {
       settingsButton.classList.add('has-health-warning');
       settingsButton.dataset.healthStatus = 'critical';
-      healthMonitorButton.dataset.healthStatus = 'critical';
       globalThis.LumenDiagnostics.report('服务健康', error);
       if (activeSettingsTab === 'health' && settingsDialog.open)
         serviceHealthGrid.innerHTML = '<div class="session-manager-loading">无法读取服务状态</div>';
+      if (activeSettingsTab === 'dependencies' && settingsDialog.open) {
+        dependencySummary.textContent = '无法读取依赖状态';
+        dependencyGrid.innerHTML = '<div class="session-manager-loading">依赖检查请求失败</div>';
+      }
     }
   }
 
-  function renderHealthMonitorPopover() {
-    const status = healthMonitorButton.dataset.healthStatus || 'unknown';
-    healthMonitorPopover.dataset.status = status;
-    const header = healthMonitorPopover.querySelector('header');
-    header.dataset.status = status;
-    header.querySelector('small').textContent = !latestHealthCards.length
-      ? '正在读取…'
-      : status === 'ok' ? '全部正常' : status === 'warning' ? '存在预警' : '存在异常';
-    const list = healthMonitorPopover.querySelector('.health-monitor-list');
-    list.replaceChildren(...latestHealthCards.map(card => {
-      const row = document.createElement('div');
-      row.className = 'health-monitor-row';
-      row.dataset.status = card.status || 'unknown';
-      row.innerHTML = '<i class="health-dot"></i><strong></strong><small></small>';
-      row.querySelector('strong').textContent = card.name;
-      row.querySelector('small').textContent = card.detail;
-      row.querySelector('small').title = card.detail;
-      return row;
+  function renderDependencyChecks(status) {
+    const checks = [
+      { key: 'ptyClient', name: 'PTY 客户端', detail: 'Web 服务连接持久终端所需的 lumen-pty', required: true },
+      { key: 'normalPtySocket', name: '普通 PTY', detail: '普通用户会话的 Unix Socket', required: true },
+      { key: 'rootPtySocket', name: 'Root PTY', detail: '特权会话的隔离 Unix Socket', required: true },
+      { key: 'tmux', name: 'tmux', detail: '持久会话与进程恢复', required: true },
+      { key: 'shell', name: '默认 Shell', detail: '创建交互式终端所需的登录 Shell', required: true },
+      { key: 'websockets', name: 'libwebsockets', detail: 'HTTP 与 WebSocket 传输层（内置）', required: true },
+      { key: 'openssl', name: 'OpenSSL', detail: '密码散列、会话和安全随机数（内置）', required: true },
+      { key: 'fido2', name: 'libfido2', detail: '通行密钥与 WebAuthn 支持（内置）', required: true },
+      { key: 'qrencode', name: 'libqrencode', detail: 'TOTP 二维码生成（内置）', required: true },
+      { key: 'bubblewrap', name: 'bubblewrap', detail: 'Codex Linux 沙箱的可选运行依赖', required: false },
+      { key: 'userNamespaces', name: 'User Namespace', detail: 'bubblewrap 创建隔离沙箱所需的内核能力', required: false },
+    ].map(item => ({ ...item, available: status[item.key] === true }));
+    const missingRequired = checks.filter(item => item.required && !item.available);
+    const missingOptional = checks.filter(item => !item.required && !item.available);
+    dependencySummary.textContent = missingRequired.length
+      ? `${missingRequired.length} 项必要依赖异常`
+      : missingOptional.length
+        ? `必要依赖正常 · ${missingOptional.length} 项可选能力不可用`
+        : '所有运行依赖和可选能力均正常';
+    dependencyGrid.replaceChildren(...checks.map(item => {
+      const card = document.createElement('article');
+      card.className = 'dependency-card';
+      card.dataset.status = item.available ? 'ok' : item.required ? 'error' : 'warning';
+      card.innerHTML = '<i class="health-dot"></i><span><strong></strong><small></small></span><b></b>';
+      card.querySelector('strong').textContent = item.name;
+      card.querySelector('small').textContent = item.detail;
+      card.querySelector('b').textContent = item.available ? '可用' : item.required ? '缺失' : '未启用';
+      return card;
     }));
-    positionHoverPopover(healthMonitorPopover, healthMonitorButton);
-  }
-
-  function openHealthMonitor() {
-    renderHealthMonitorPopover();
-    void refreshServiceHealth(false);
   }
 
   function copyServiceDiagnostics() {
@@ -3270,6 +3352,7 @@
 
   function syncSettingsControls() {
     copySelectionSetting.checked = settings.copySelection;
+    setCustomSelect(themeSetting, followsSystemTheme ? 'system' : currentTheme);
     applyFontSize(settings.fontSize);
     setCustomSelect(fontFamilySetting, settings.fontFamily);
     fontWeightSetting.value = String(settings.fontWeight);
@@ -3316,6 +3399,11 @@
     if (activeSettingsTab === 'audit') void refreshAuditLog();
     if (activeSettingsTab === 'diagnostics') renderDiagnostics();
     if (activeSettingsTab === 'health') void refreshServiceHealth();
+    if (activeSettingsTab === 'dependencies') {
+      dependencySummary.textContent = '正在检查运行环境…';
+      dependencyGrid.innerHTML = '<div class="session-manager-loading">正在读取依赖状态…</div>';
+      void refreshServiceHealth(false);
+    }
   }
 
   function openPasskeyActionDialog(mode, item) {
@@ -3501,32 +3589,12 @@
     showContextMenu(event, stripContextItems(), () => sessions.get(activeId)?.term.focus());
   });
   settingsButton.addEventListener('click', openSettings);
-  healthMonitorButton.addEventListener('pointerenter', openHealthMonitor);
-  healthMonitorButton.addEventListener('pointerleave', () => {
-    hideHoverPopover(healthMonitorPopover);
-  });
-  healthMonitorButton.addEventListener('focus', openHealthMonitor);
-  healthMonitorButton.addEventListener('blur', () => {
-    hideHoverPopover(healthMonitorPopover);
-  });
-  healthMonitorButton.addEventListener('click', () => {
-    hideHoverPopover(healthMonitorPopover, true);
-    openSettings();
-    activateSettingsTab('health');
-  });
   tabSessionPopover.addEventListener('pointerenter', () => {
     cancelHideHoverPopover(tabSessionPopover);
   });
   tabSessionPopover.addEventListener('pointerleave', () => {
     hideHoverPopover(tabSessionPopover);
   });
-  healthMonitorPopover.addEventListener('pointerenter', () => {
-    cancelHideHoverPopover(healthMonitorPopover);
-  });
-  healthMonitorPopover.addEventListener('pointerleave', () => {
-    hideHoverPopover(healthMonitorPopover);
-  });
-  healthMonitorPopover.addEventListener('click', () => healthMonitorButton.click());
   for (const tab of settingsTabs) {
     tab.addEventListener('click', () => activateSettingsTab(tab.dataset.settingsTab));
     tab.addEventListener('keydown', event => {
@@ -3666,8 +3734,9 @@
     }
   });
   themeButton.addEventListener('click', () => {
-    followsSystemTheme = false;
-    applyTheme(currentTheme === 'dark' ? 'light' : 'dark', true, true);
+    const preference = followsSystemTheme ? 'system' : currentTheme;
+    const next = { system: 'light', light: 'dark', dark: 'system' }[preference];
+    setThemePreference(next, true);
   });
   focusButton.addEventListener('click', toggleFullscreen);
   document.addEventListener('fullscreenchange', syncFullscreenState);
@@ -3706,6 +3775,7 @@
   });
   settingsDialog.addEventListener('close', () => {
     for (const control of document.querySelectorAll('.custom-select.is-open')) closeCustomSelect(control);
+    applyCursorBlink();
     sessions.get(activeId)?.term.focus();
   });
   copySelectionSetting.addEventListener('change', () => {
@@ -3735,6 +3805,7 @@
     settings.cursorBlink = cursorBlinkSetting.checked;
     applyTerminalAppearance();
     saveSettings();
+    showToast(settings.cursorBlink ? '光标闪烁已启用，返回终端后可见' : '光标闪烁已关闭');
   });
   lineHeightSetting.addEventListener('input', () => {
     settings.lineHeight = Number(lineHeightSetting.value);
@@ -3785,6 +3856,7 @@
     applyTerminalAppearance();
     saveSettings();
   });
+  installCustomSelect(themeSetting, value => setThemePreference(value, true));
   installCustomSelect(sessionManagerSort, value => {
     sessionSort = value;
     renderSessionManager();
@@ -3811,6 +3883,14 @@
     renderAuditLog();
   });
   exportTerminalButton.addEventListener('click', () => exportCurrentTerminal());
+  logoutToggleButton.addEventListener('click', () => {
+    hideContextMenu();
+    logoutSessionButton.disabled = false;
+    logoutSessionButton.textContent = '确认退出';
+    logoutDialog.showModal();
+    requestAnimationFrame(() => logoutCancelButton.focus());
+  });
+  logoutCancelButton.addEventListener('click', () => logoutDialog.close());
   logoutSessionButton.addEventListener('click', async () => {
     logoutSessionButton.disabled = true;
     logoutSessionButton.textContent = '正在退出…';
@@ -3833,7 +3913,7 @@
     } catch (error) {
       console.error('[lumen] logout failed', error);
       logoutSessionButton.disabled = false;
-      logoutSessionButton.textContent = '退出登录';
+      logoutSessionButton.textContent = '确认退出';
       showToast('退出登录失败，请稍后重试');
     }
   });
@@ -3883,6 +3963,10 @@
   document.getElementById('export-diagnostics').addEventListener('click', exportDiagnostics);
   document.getElementById('refresh-service-health').addEventListener('click',
     () => void refreshServiceHealth());
+  refreshDependenciesButton.addEventListener('click', () => {
+    dependencySummary.textContent = '正在重新检查…';
+    void refreshServiceHealth(false);
+  });
   document.getElementById('copy-service-diagnostics').addEventListener('click', copyServiceDiagnostics);
   globalThis.LumenDiagnostics.subscribe(() => {
     if (activeSettingsTab === 'diagnostics' && settingsDialog.open) renderDiagnostics();
@@ -4095,7 +4179,7 @@
   auditPoller.start(10000);
   const healthPoller = new AdaptivePoller(async () => {
     if (!document.hidden) await refreshServiceHealth(false);
-  }, () => activeSettingsTab === 'health' && settingsDialog.open || !healthMonitorPopover.hidden
+  }, () => ['health', 'dependencies'].includes(activeSettingsTab) && settingsDialog.open
     ? HEALTH_REFRESH_INTERVAL
     : 30000);
   healthPoller.start(1500);
