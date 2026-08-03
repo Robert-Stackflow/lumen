@@ -143,7 +143,9 @@ bool lumen_auth_consume_privileged_grant(struct lumen_auth *auth, const char *au
 char *lumen_auth_preferences_get(struct lumen_auth *auth, uint64_t *version);
 bool lumen_auth_preferences_set(struct lumen_auth *auth, const char *json, bool *conflict);
 void lumen_auth_privileged_preferences(struct lumen_auth *auth, unsigned int default_max_sessions,
-                                        unsigned int *max_sessions, bool *require_verification);
+                                        unsigned int default_idle_seconds,
+                                        unsigned int *max_sessions, unsigned int *idle_seconds,
+                                        bool *require_verification);
 
 int lumen_auth_new_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);
 int lumen_auth_clear_session_cookie(struct lumen_auth *auth, char *header, size_t header_len);

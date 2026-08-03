@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <limits.h>
 #ifdef __linux__
 #include <linux/capability.h>
 #include <sys/prctl.h>
@@ -40,6 +41,7 @@
 #define LUMEN_SESSIONS_MAX 64U
 #define LUMEN_QUEUE_EXTRA (256U * 1024U)
 #define LUMEN_INPUT_MAX (1024U * 1024U)
+#define LUMEN_WORKER_TASKS_MAX 256U
 
 enum message_type {
     MSG_HELLO = 1,
@@ -53,6 +55,7 @@ enum message_type {
     MSG_UNPROTECT = 9,
     MSG_KILL_FORCE = 10,
     MSG_ENSURE_WORKER = 11,
+    MSG_SET_IDLE_TIMEOUT = 12,
     MSG_OUTPUT = 101,
     MSG_STATUS = 102,
     MSG_EXIT = 103,
@@ -155,6 +158,9 @@ static volatile sig_atomic_t child_changed;
 static volatile sig_atomic_t client_resized;
 static struct termios saved_termios;
 static bool saved_termios_valid;
+#ifdef __linux__
+static char worker_cgroup_root[PATH_MAX];
+#endif
 
 static void restore_client_terminal(void) {
     if (saved_termios_valid) {
@@ -191,6 +197,87 @@ static int set_nonblocking(int fd) {
     }
     return 0;
 }
+
+#ifdef __linux__
+static bool current_cgroup_path(char *path, size_t path_size) {
+    FILE *file = fopen("/proc/self/cgroup", "r");
+    if (!file) return false;
+    char line[PATH_MAX + 32];
+    bool found = false;
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "0::", 3)) continue;
+        char *value = line + 3;
+        value[strcspn(value, "\r\n")] = '\0';
+        int written = snprintf(path, path_size, "/sys/fs/cgroup%s", value);
+        found = written > 0 && (size_t)written < path_size;
+        break;
+    }
+    fclose(file);
+    return found;
+}
+
+static bool write_cgroup_value(const char *directory, const char *name, const char *value) {
+    char path[PATH_MAX];
+    int written = snprintf(path, sizeof(path), "%s/%s", directory, name);
+    if (written <= 0 || (size_t)written >= sizeof(path)) return false;
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    size_t length = strlen(value);
+    bool saved = write(fd, value, length) == (ssize_t)length;
+    close(fd);
+    return saved;
+}
+
+static bool initialize_worker_cgroups(void) {
+    char service[PATH_MAX], workers[PATH_MAX];
+    if (!current_cgroup_path(service, sizeof(service))) return false;
+    int written = 0;
+    size_t service_length = strlen(service);
+    bool already_in_broker = service_length > 7 &&
+                             !strcmp(service + service_length - 7, "/broker");
+    if (!already_in_broker) {
+        errno = ENOTSUP;
+        return false;
+    }
+    service[service_length - 7] = '\0';
+    written = snprintf(workers, sizeof(workers), "%s/workers", service);
+    if (written <= 0 || (size_t)written >= sizeof(workers) ||
+        (mkdir(workers, 0750) != 0 && errno != EEXIST)) return false;
+    if (!write_cgroup_value(service, "cgroup.subtree_control", "+pids") ||
+        !write_cgroup_value(workers, "cgroup.subtree_control", "+pids")) return false;
+    snprintf(worker_cgroup_root, sizeof(worker_cgroup_root), "%s", service);
+    return true;
+}
+
+static bool place_worker_in_cgroup(const char *id, pid_t pid) {
+    char service[PATH_MAX], workers[PATH_MAX], worker[PATH_MAX];
+    if (worker_cgroup_root[0]) {
+        snprintf(service, sizeof(service), "%s", worker_cgroup_root);
+    } else if (!current_cgroup_path(service, sizeof(service))) {
+        return false;
+    }
+    int written = snprintf(workers, sizeof(workers), "%s/workers", service);
+    if (written <= 0 || (size_t)written >= sizeof(workers) ||
+        (mkdir(workers, 0750) != 0 && errno != EEXIST)) return false;
+    written = snprintf(worker, sizeof(worker), "%s/%s", workers, id);
+    if (written <= 0 || (size_t)written >= sizeof(worker) ||
+        (mkdir(worker, 0750) != 0 && errno != EEXIST)) return false;
+    char limit[32], process[32];
+    snprintf(limit, sizeof(limit), "%u", LUMEN_WORKER_TASKS_MAX);
+    snprintf(process, sizeof(process), "%ld", (long)pid);
+    return write_cgroup_value(worker, "pids.max", limit) &&
+           write_cgroup_value(worker, "cgroup.procs", process);
+}
+#else
+static bool place_worker_in_cgroup(const char *id, pid_t pid) {
+    (void)id;
+    (void)pid;
+    return false;
+}
+static bool initialize_worker_cgroups(void) {
+    return false;
+}
+#endif
 
 static bool valid_session_id(const char *value, size_t length) {
     if (length < 1 || length > LUMEN_ID_MAX || !isalnum((unsigned char) value[0]) ||
@@ -424,7 +511,17 @@ static const char *resolve_attach_socket(const char *supervisor_socket,
     if (route == STATUS_LEGACY) return supervisor_socket;
     if (route != STATUS_OK) return NULL;
     char worker_dir[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    if (!default_worker_dir(worker_dir, sizeof(worker_dir), supervisor_socket) ||
+    const char *configured_worker_dir = getenv(privileged_session_id(session_id)
+                                                    ? "LUMEN_ROOT_PTY_WORKER_DIR"
+                                                    : "LUMEN_PTY_WORKER_DIR");
+    bool worker_dir_valid;
+    if (configured_worker_dir && configured_worker_dir[0]) {
+        int written = snprintf(worker_dir, sizeof(worker_dir), "%s", configured_worker_dir);
+        worker_dir_valid = written > 0 && (size_t)written < sizeof(worker_dir);
+    } else {
+        worker_dir_valid = default_worker_dir(worker_dir, sizeof(worker_dir), supervisor_socket);
+    }
+    if (!worker_dir_valid ||
         !worker_socket_path(worker_socket, worker_socket_size, worker_dir, session_id))
         return NULL;
     return worker_socket;
@@ -1423,6 +1520,7 @@ static int spawn_worker(const struct server_config *config, const char *id) {
     pid_t pid = fork();
     if (pid < 0) return STATUS_UNAVAILABLE;
     if (pid == 0) {
+        raise(SIGSTOP);
         setsid();
         char *arguments[32];
         size_t count = 0;
@@ -1454,6 +1552,17 @@ static int spawn_worker(const struct server_config *config, const char *id) {
         arguments[count] = NULL;
         execv("/proc/self/exe", arguments);
         _exit(127);
+    }
+
+    int child_status = 0;
+    while (waitpid(pid, &child_status, WUNTRACED) < 0) {
+        if (errno != EINTR) break;
+    }
+    if (WIFSTOPPED(child_status)) {
+        if (!place_worker_in_cgroup(id, pid) && errno != EACCES && errno != EROFS)
+            fprintf(stderr, "lumen-pty: could not isolate worker %s cgroup: %s\n",
+                    id, strerror(errno));
+        kill(pid, SIGCONT);
     }
 
     for (unsigned int attempt = 0; attempt < 100; attempt++) {
@@ -1512,6 +1621,29 @@ static int worker_control_any(const struct server_config *config,
     return result;
 }
 
+static int worker_control_all(const struct server_config *config,
+                              uint8_t type, const char *value) {
+    if (!config->worker_dir) return STATUS_OK;
+    DIR *directory = opendir(config->worker_dir);
+    if (!directory) return errno == ENOENT ? STATUS_OK : STATUS_UNAVAILABLE;
+    int result = STATUS_OK;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        size_t length = strlen(entry->d_name);
+        if (length <= 5 || strcmp(entry->d_name + length - 5, ".sock")) continue;
+        char id[LUMEN_ID_MAX + 1];
+        size_t id_length = length - 5;
+        if (id_length >= sizeof(id)) continue;
+        memcpy(id, entry->d_name, id_length);
+        id[id_length] = '\0';
+        if (!valid_session_id(id, id_length)) continue;
+        int current = worker_control(config, id, type, value);
+        if (current != STATUS_OK && current != STATUS_NOT_FOUND) result = current;
+    }
+    closedir(directory);
+    return result;
+}
+
 static bool append_worker_inventory(const struct server_config *config,
                                     char *list, size_t list_size, size_t *used) {
     if (!config->worker_dir) return true;
@@ -1552,7 +1684,7 @@ static bool append_worker_inventory(const struct server_config *config,
 
 static bool handle_client_message(struct client *client, struct session **sessions,
                                   struct client *clients,
-                                  const struct server_config *config,
+                                  struct server_config *config,
                                   size_t queue_limit) {
     unsigned char packet[sizeof(struct message_header) + LUMEN_PACKET_DATA_MAX];
     ssize_t received = recv(client->fd, packet, sizeof(packet), MSG_DONTWAIT);
@@ -1586,6 +1718,34 @@ static bool handle_client_message(struct client *client, struct session **sessio
         }
         return queue_status_and_close(client, queue_limit,
                                       (uint16_t)ensure_worker(config, *sessions, id));
+    }
+
+    if (header.type == MSG_SET_IDLE_TIMEOUT) {
+        if (client->session || !config->privileged || !header.length || header.length >= 16) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        char value[16] = {0};
+        memcpy(value, payload, header.length);
+        char *end = NULL;
+        errno = 0;
+        unsigned long timeout = strtoul(value, &end, 10);
+        if (errno || !end || end == value || *end || timeout > 86400) {
+            queue_status_and_close(client, queue_limit, STATUS_INVALID);
+            return true;
+        }
+        if (config->idle_timeout_seconds == (unsigned int)timeout) {
+            queue_status_and_close(client, queue_limit, STATUS_OK);
+            return true;
+        }
+        config->idle_timeout_seconds = (unsigned int)timeout;
+        int result = config->worker_id
+            ? STATUS_OK
+            : worker_control_all(config, MSG_SET_IDLE_TIMEOUT, value);
+        fprintf(stderr, "lumen-pty: root idle timeout updated to %u seconds\n",
+                config->idle_timeout_seconds);
+        queue_status_and_close(client, queue_limit, (uint16_t)result);
+        return true;
     }
 
     if (header.type == MSG_HELLO) {
@@ -1977,7 +2137,7 @@ static void discover_tmux_sessions(struct session **sessions,
     while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
 }
 
-static int serve(const struct server_config *config) {
+static int serve(struct server_config *config) {
     if (config->worker_dir && !config->worker_id) {
         if (mkdir(config->worker_dir, 0770) != 0 && errno != EEXIST) {
             fprintf(stderr, "Could not create worker directory %s: %s\n",
@@ -1985,6 +2145,10 @@ static int serve(const struct server_config *config) {
             return 1;
         }
         if (chmod(config->worker_dir, 0770) != 0) return 1;
+        if (!initialize_worker_cgroups() && errno != EACCES && errno != EROFS &&
+            errno != ENOENT && errno != ENOTSUP)
+            fprintf(stderr, "lumen-pty: worker cgroup isolation unavailable: %s\n",
+                    strerror(errno));
     }
     int listen_fd = create_listen_socket(config->socket_path);
     if (listen_fd < 0) {
@@ -2198,6 +2362,7 @@ static void usage(FILE *stream) {
             "  lumen-pty --protect <session-id>\n"
             "  lumen-pty --unprotect <session-id>\n"
             "  lumen-pty --disconnect <connection-id>\n"
+            "  lumen-pty --set-idle-timeout <seconds>\n"
             "  lumen-pty --list\n"
             "  lumen-pty --list-json\n"
             "  lumen-pty --serve [--socket PATH] [--shell PATH] [--cwd PATH]\\\n"
@@ -2311,6 +2476,13 @@ int main(int argc, char **argv) {
         (void)strtoull(argv[2], &end, 10);
         if (errno || !end || end == argv[2] || *end) return STATUS_INVALID;
         return control_client(socket_path, MSG_DISCONNECT, argv[2]);
+    }
+    if (argc == 3 && strcmp(argv[1], "--set-idle-timeout") == 0) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long timeout = strtoul(argv[2], &end, 10);
+        if (errno || !end || end == argv[2] || *end || timeout > 86400) return STATUS_INVALID;
+        return control_client(socket_path, MSG_SET_IDLE_TIMEOUT, argv[2]);
     }
     if (argc == 2 && strcmp(argv[1], "--list") == 0) {
         return control_client(socket_path, MSG_LIST, NULL);

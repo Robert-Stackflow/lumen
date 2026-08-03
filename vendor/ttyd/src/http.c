@@ -267,6 +267,25 @@ static int session_control(const char *operation, const char *session_id) {
   return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+static int set_root_idle_timeout(unsigned int idle_seconds) {
+  char value[16];
+  snprintf(value, sizeof(value), "%u", idle_seconds);
+  pid_t pid = fork();
+  if (pid < 0) return -1;
+  if (pid == 0) {
+    const char *socket = getenv("LUMEN_ROOT_PTY_SOCKET");
+    setenv("LUMEN_PTY_SOCKET",
+           socket && socket[0] ? socket : "/run/lumen-root-terminal/pty.sock", 1);
+    execl(server->command, server->command, "--set-idle-timeout", value, (char *)NULL);
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return -1;
+  }
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
 static int disconnect_client(const char *session_id, const char *connection_id) {
   pid_t pid = fork();
   if (pid < 0) return -1;
@@ -382,12 +401,20 @@ static char *list_sessions(size_t *output_len) {
   return combined;
 }
 
-static unsigned int configured_root_max_sessions(bool *require_verification) {
+static unsigned int configured_root_max_sessions(bool *require_verification,
+                                                 unsigned int *idle_seconds) {
   const char *configured = getenv("LUMEN_ROOT_MAX_SESSIONS");
   unsigned int fallback = configured ? (unsigned int)strtoul(configured, NULL, 10) : 2;
   if (fallback < 1 || fallback > 8) fallback = 2;
+  const char *configured_idle = getenv("LUMEN_ROOT_IDLE_SESSION_SECONDS");
+  unsigned int idle_fallback = configured_idle
+                                   ? (unsigned int)strtoul(configured_idle, NULL, 10) : 1800;
+  if (idle_fallback > 86400) idle_fallback = 1800;
   unsigned int maximum = fallback;
-  lumen_auth_privileged_preferences(server->auth, fallback, &maximum, require_verification);
+  unsigned int idle = idle_fallback;
+  lumen_auth_privileged_preferences(server->auth, fallback, idle_fallback,
+                                    &maximum, &idle, require_verification);
+  if (idle_seconds) *idle_seconds = idle;
   return maximum;
 }
 
@@ -730,7 +757,10 @@ static int complete_totp_confirm(struct lws *wsi, struct pss_http *pss) {
 }
 
 static int complete_privileged_grant(struct lws *wsi, struct pss_http *pss, const char *method) {
-  unsigned int maximum = configured_root_max_sessions(NULL);
+  unsigned int idle_seconds = 1800;
+  unsigned int maximum = configured_root_max_sessions(NULL, &idle_seconds);
+  if (set_root_idle_timeout(idle_seconds) != 0)
+    return send_empty(wsi, HTTP_STATUS_SERVICE_UNAVAILABLE, NULL, NULL, NULL);
   bool already_exists = false;
   if (!privileged_capacity_available(pss->terminal_id, maximum, &already_exists)) {
     lumen_auth_audit(server->auth, "privileged_session_rejected", pss->client,
@@ -790,12 +820,19 @@ static int complete_preferences(struct lws *wsi, struct pss_http *pss) {
   if (saved) lumen_auth_audit(server->auth, "preferences_updated", pss->client, "patch");
   pss_buffer_free(pss);
   if (saved) {
+    bool require_verification = true;
+    unsigned int idle_seconds = 1800;
+    configured_root_max_sessions(&require_verification, &idle_seconds);
+    bool root_policy_applied = set_root_idle_timeout(idle_seconds) == 0;
+    if (!root_policy_applied)
+      lwsl_err("Could not apply root idle timeout %u to PTY service\n", idle_seconds);
     uint64_t version = 0;
     char *preferences = lumen_auth_preferences_get(server->auth, &version);
     free(preferences);
-    char *body = malloc(64);
+    char *body = malloc(96);
     if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
-    int length = snprintf(body, 64, "{\"version\":\"%llu\"}", (unsigned long long)version);
+    int length = snprintf(body, 96, "{\"version\":\"%llu\",\"rootPolicyApplied\":%s}",
+                          (unsigned long long)version, root_policy_applied ? "true" : "false");
     return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                      body, (size_t)length, true, NULL, 0);
   }
@@ -890,19 +927,19 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       if (!strcmp(pss->path, privileged_methods)) {
         if (method != LWSHUMETH_GET) return send_empty(wsi, HTTP_STATUS_METHOD_NOT_ALLOWED, NULL, NULL, NULL);
         if (check_auth(wsi) != AUTH_OK) return send_empty(wsi, HTTP_STATUS_UNAUTHORIZED, NULL, NULL, NULL);
-        char *body = malloc(160);
+        char *body = malloc(192);
         if (!body) return send_empty(wsi, HTTP_STATUS_INTERNAL_SERVER_ERROR, NULL, NULL, NULL);
-        const char *idle_seconds = getenv("LUMEN_ROOT_IDLE_SESSION_SECONDS");
         bool require_verification = true;
-        unsigned int root_max = configured_root_max_sessions(&require_verification);
-        unsigned int root_idle = idle_seconds ? (unsigned int)strtoul(idle_seconds, NULL, 10) : 1800;
-        if (root_idle < 300 || root_idle > 86400) root_idle = 1800;
-        int written = snprintf(body, 160,
+        unsigned int root_idle = 1800;
+        unsigned int root_max = configured_root_max_sessions(&require_verification, &root_idle);
+        bool root_policy_applied = set_root_idle_timeout(root_idle) == 0;
+        int written = snprintf(body, 192,
                                "{\"totp\":%s,\"passkey\":%s,\"maxSessions\":%u,\"idleSeconds\":%u,"
-                               "\"requireVerification\":%s}",
+                               "\"requireVerification\":%s,\"idleApplied\":%s}",
                                lumen_auth_totp_enabled(server->auth) ? "true" : "false",
                                lumen_auth_has_passkeys(server->auth) ? "true" : "false",
-                               root_max, root_idle, require_verification ? "true" : "false");
+                               root_max, root_idle, require_verification ? "true" : "false",
+                               root_policy_applied ? "true" : "false");
         return send_text(wsi, pss, HTTP_STATUS_OK, "application/json;charset=utf-8",
                          body, (size_t)written, true, NULL, 0);
       }
@@ -921,7 +958,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
             !privileged_session_id(pss->terminal_id))
           return send_empty(wsi, HTTP_STATUS_BAD_REQUEST, NULL, NULL, NULL);
         bool require_verification = true;
-        configured_root_max_sessions(&require_verification);
+        configured_root_max_sessions(&require_verification, NULL);
         if (require_verification)
           return send_empty(wsi, HTTP_STATUS_FORBIDDEN, NULL, NULL, NULL);
         char mode[16] = "";

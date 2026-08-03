@@ -143,6 +143,7 @@
   const inheritWorkingDirectorySetting = document.getElementById('setting-inherit-working-directory');
   const persistTerminalStateSetting = document.getElementById('setting-persist-terminal-state');
   const rootMaxSessionsSetting = document.getElementById('setting-root-max-sessions');
+  const rootIdleTimeoutSetting = document.getElementById('setting-root-idle-timeout');
   const defaultRootSessionSetting = document.getElementById('setting-default-root-session');
   const rootRequireVerificationSetting = document.getElementById('setting-root-require-verification');
   const shortcutSearchSetting = document.getElementById('setting-shortcut-search');
@@ -299,6 +300,7 @@
       inheritWorkingDirectory: true,
       persistTerminalState: true,
       rootMaxSessions: 2,
+      rootIdleSessionSeconds: 1800,
       defaultRootSession: false,
       rootRequireVerification: true,
       idleCleanupSeconds: 1800,
@@ -339,6 +341,9 @@
         rootMaxSessions: Number.isInteger(saved?.rootMaxSessions)
           && saved.rootMaxSessions >= 1 && saved.rootMaxSessions <= 8
           ? saved.rootMaxSessions : defaults.rootMaxSessions,
+        rootIdleSessionSeconds: [0, 1800, 3600, 21600, 86400]
+          .includes(Number(saved?.rootIdleSessionSeconds))
+          ? Number(saved.rootIdleSessionSeconds) : defaults.rootIdleSessionSeconds,
         defaultRootSession: typeof saved?.defaultRootSession === 'boolean'
           ? saved.defaultRootSession : defaults.defaultRootSession,
         rootRequireVerification: typeof saved?.rootRequireVerification === 'boolean'
@@ -403,6 +408,11 @@
         }
         if (!response.ok) throw new Error(`preferences update ${response.status}`);
         const saved = await response.json();
+        if (saved.rootPolicyApplied === false) {
+          const error = new Error('root PTY policy update failed');
+          globalThis.LumenDiagnostics.report('root 空闲策略', error);
+          showToast('设置已保存，但 root 空闲策略暂未应用');
+        }
         preferencesVersion = String(saved.version || preferencesVersion);
         lastSyncedPreferences = { ...(lastSyncedPreferences || {}), ...patch };
         preferencesDirty = Object.keys(
@@ -432,7 +442,8 @@
       if (hasRemote && !preferencesDirty) {
         const hydratedRemote = { ...remote };
         let migratedRootPreferences = false;
-        for (const key of ['rootMaxSessions', 'defaultRootSession', 'rootRequireVerification']) {
+        for (const key of ['rootMaxSessions', 'rootIdleSessionSeconds',
+          'defaultRootSession', 'rootRequireVerification']) {
           if (Object.hasOwn(remote, key)) continue;
           hydratedRemote[key] = settings[key];
           migratedRootPreferences = true;
@@ -896,11 +907,15 @@
     });
     if (!response.ok) throw new Error(`methods ${response.status}`);
     const methods = await response.json();
+    const idleSeconds = Number(methods.idleSeconds);
     privilegedPolicy = {
       maxSessions: Math.max(1, Math.min(8, Number(methods.maxSessions) || 2)),
-      idleSeconds: Math.max(300, Math.min(86400, Number(methods.idleSeconds) || 1800)),
+      idleSeconds: Number.isFinite(idleSeconds)
+        ? Math.max(0, Math.min(86400, idleSeconds)) : 1800,
       requireVerification: methods.requireVerification !== false,
     };
+    if (methods.idleApplied === false)
+      globalThis.LumenDiagnostics.report('root 空闲策略', new Error('PTY policy update failed'));
     session.privilegedMethods = methods;
     return methods;
   }
@@ -917,8 +932,9 @@
       session.privilegedTotpField.hidden = !methods.totp;
       session.privilegedTotpButton.hidden = !methods.totp;
       session.privilegedPasskeyButton.hidden = !methods.passkey;
-      session.privilegedGatePolicy.textContent =
-        `最多 ${privilegedPolicy.maxSessions} 个 root 会话 · 空闲约 ${Math.round(privilegedPolicy.idleSeconds / 60)} 分钟后自动结束`;
+      session.privilegedGatePolicy.textContent = privilegedPolicy.idleSeconds === 0
+        ? `最多 ${privilegedPolicy.maxSessions} 个 root 会话 · 不自动回收空闲会话`
+        : `最多 ${privilegedPolicy.maxSessions} 个 root 会话 · 空闲约 ${Math.round(privilegedPolicy.idleSeconds / 60)} 分钟后自动结束`;
       if (!privilegedPolicy.requireVerification) {
         session.privilegedGateDescription.textContent = `正在安全连接 ${session.id}…`;
         session.privilegedTotpField.hidden = true;
@@ -2195,6 +2211,9 @@
         cache: 'no-store',
       }).then(response => response.ok ? response.json() : Promise.reject(new Error('policy')));
       privilegedPolicy.maxSessions = Math.max(1, Math.min(8, Number(methods.maxSessions) || 2));
+      const idleSeconds = Number(methods.idleSeconds);
+      privilegedPolicy.idleSeconds = Number.isFinite(idleSeconds)
+        ? Math.max(0, Math.min(86400, idleSeconds)) : 1800;
       privilegedPolicy.requireVerification = methods.requireVerification !== false;
     } catch {
       showToast('无法读取 root 会话安全策略');
@@ -3369,6 +3388,7 @@
     inheritWorkingDirectorySetting.checked = settings.inheritWorkingDirectory;
     persistTerminalStateSetting.checked = settings.persistTerminalState;
     setCustomSelect(rootMaxSessionsSetting, String(settings.rootMaxSessions));
+    setCustomSelect(rootIdleTimeoutSetting, String(settings.rootIdleSessionSeconds));
     defaultRootSessionSetting.checked = settings.defaultRootSession;
     rootRequireVerificationSetting.checked = settings.rootRequireVerification;
     setCustomSelect(idleCleanupThreshold, String(settings.idleCleanupSeconds));
@@ -3830,6 +3850,15 @@
     privilegedPolicy.maxSessions = settings.rootMaxSessions;
     for (const session of sessions.values()) session.privilegedMethods = null;
     saveSettings();
+  });
+  installCustomSelect(rootIdleTimeoutSetting, value => {
+    const seconds = Number(value);
+    settings.rootIdleSessionSeconds = [0, 1800, 3600, 21600, 86400].includes(seconds)
+      ? seconds : 1800;
+    privilegedPolicy.idleSeconds = settings.rootIdleSessionSeconds;
+    for (const session of sessions.values()) session.privilegedMethods = null;
+    saveSettings();
+    showToast(seconds === 0 ? 'root 空闲会话将不会自动回收' : `root 空闲回收已设为 ${seconds / 60} 分钟`);
   });
   defaultRootSessionSetting.addEventListener('change', () => {
     settings.defaultRootSession = defaultRootSessionSetting.checked;

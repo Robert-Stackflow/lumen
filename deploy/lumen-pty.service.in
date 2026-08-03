@@ -10,14 +10,15 @@ User=lumen-pty
 Group=@SOCKET_GROUP@
 WorkingDirectory=/var/lib/lumen-pty
 StateDirectory=lumen-pty
-StateDirectoryMode=0700
+StateDirectoryMode=0750
 Environment=HOME=@HOME@
 Environment=LANG=C.UTF-8
 Environment=SHELL=@SHELL@
 RuntimeDirectory=lumen-terminal
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=restart
 Environment=LUMEN_PTY_SOCKET=/run/lumen-terminal/pty.sock
-ExecStart=/opt/lumen-terminal/bin/lumen-pty --serve --socket /run/lumen-terminal/pty.sock --shell @SHELL@ --shell-uid @UID@ --shell-gid @GID@ --cwd @HOME@ --history-bytes ${LUMEN_PTY_HISTORY_BYTES} --max-sessions ${LUMEN_MAX_SESSIONS} --idle-timeout ${LUMEN_IDLE_SESSION_SECONDS} --tmux /usr/bin/tmux
+ExecStart=/opt/lumen-terminal/bin/lumen-pty --serve --socket /run/lumen-terminal/pty.sock --worker-dir /var/lib/lumen-pty/sessions --shell @SHELL@ --shell-uid @UID@ --shell-gid @GID@ --cwd @HOME@ --history-bytes ${LUMEN_PTY_HISTORY_BYTES} --max-sessions ${LUMEN_MAX_SESSIONS} --idle-timeout ${LUMEN_IDLE_SESSION_SECONDS} --tmux /usr/bin/tmux
 EnvironmentFile=/etc/lumen-terminal/runtime.env
 Restart=on-failure
 RestartSec=1
@@ -26,9 +27,11 @@ TimeoutStopSec=5
 UMask=0077
 LimitNOFILE=4096
 LimitCORE=0
-TasksMax=256
+TasksMax=1024
 MemoryHigh=2G
 MemoryMax=3G
+Delegate=pids
+DelegateSubgroup=broker
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
 AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_KILL

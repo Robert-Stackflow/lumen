@@ -32,6 +32,8 @@ def main() -> None:
     assert '\\"latencyMs\\"' in http
     assert '\\"dependencies\\"' in http
     assert '\\"bubblewrap\\"' in http
+    assert '"--set-idle-timeout"' in http
+    assert 'rootPolicyApplied' in http
     assert "credentials: 'same-origin'" in app
     print("audit log API and UI contract passed")
 

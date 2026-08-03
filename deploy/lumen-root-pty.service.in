@@ -9,13 +9,16 @@ Type=simple
 User=root
 Group=@ROOT_SOCKET_GROUP@
 WorkingDirectory=/root
+StateDirectory=lumen-root-pty
+StateDirectoryMode=0750
 Environment=HOME=/root
 Environment=LANG=C.UTF-8
 Environment=SHELL=/bin/bash
 RuntimeDirectory=lumen-root-terminal
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=restart
 Environment=LUMEN_PTY_SOCKET=/run/lumen-root-terminal/pty.sock
-ExecStart=/opt/lumen-terminal/bin/lumen-pty --serve --privileged --socket /run/lumen-root-terminal/pty.sock --shell /bin/bash --shell-uid 0 --shell-gid 0 --client-uid @WEB_UID@ --cwd /root --history-bytes ${LUMEN_PTY_HISTORY_BYTES} --max-sessions 8 --idle-timeout ${LUMEN_ROOT_IDLE_SESSION_SECONDS} --tmux /usr/bin/tmux --tmux-label lumen-root
+ExecStart=/opt/lumen-terminal/bin/lumen-pty --serve --privileged --socket /run/lumen-root-terminal/pty.sock --worker-dir /var/lib/lumen-root-pty/sessions --shell /bin/bash --shell-uid 0 --shell-gid 0 --client-uid @WEB_UID@ --cwd /root --history-bytes ${LUMEN_PTY_HISTORY_BYTES} --max-sessions 8 --idle-timeout ${LUMEN_ROOT_IDLE_SESSION_SECONDS} --tmux /usr/bin/tmux --tmux-label lumen-root
 EnvironmentFile=/etc/lumen-terminal/runtime.env
 Restart=on-failure
 RestartSec=1
@@ -24,12 +27,14 @@ TimeoutStopSec=5
 UMask=0077
 LimitNOFILE=2048
 LimitCORE=0
-TasksMax=128
-MemoryHigh=1G
-MemoryMax=2G
+TasksMax=1024
+MemoryHigh=2G
+MemoryMax=3G
+Delegate=pids
+DelegateSubgroup=broker
 LockPersonality=true
 ProtectClock=true
-ProtectControlGroups=true
+ProtectControlGroups=false
 ProtectHostname=true
 ProtectKernelLogs=true
 ProtectKernelModules=true

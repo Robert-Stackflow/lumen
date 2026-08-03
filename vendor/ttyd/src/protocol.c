@@ -137,7 +137,7 @@ static char **build_args(struct pss_tty *pss) {
 }
 
 static char **build_env(struct pss_tty *pss) {
-  int i = 0, n = 5;
+  int i = 0, n = 7;
   char **envp = xmalloc(n * sizeof(char *));
 
   // TERM
@@ -160,6 +160,19 @@ static char **build_env(struct pss_tty *pss) {
   if (!root_socket || !root_socket[0]) root_socket = "/run/lumen-root-terminal/pty.sock";
   envp[i] = xmalloc(strlen(root_socket) + 23);
   sprintf(envp[i], "LUMEN_ROOT_PTY_SOCKET=%s", root_socket);
+  i++;
+
+  const char *worker_dir = getenv("LUMEN_PTY_WORKER_DIR");
+  if (!worker_dir || !worker_dir[0]) worker_dir = "/var/lib/lumen-pty/sessions";
+  envp[i] = xmalloc(strlen(worker_dir) + 22);
+  sprintf(envp[i], "LUMEN_PTY_WORKER_DIR=%s", worker_dir);
+  i++;
+
+  const char *root_worker_dir = getenv("LUMEN_ROOT_PTY_WORKER_DIR");
+  if (!root_worker_dir || !root_worker_dir[0])
+    root_worker_dir = "/var/lib/lumen-root-pty/sessions";
+  envp[i] = xmalloc(strlen(root_worker_dir) + 27);
+  sprintf(envp[i], "LUMEN_ROOT_PTY_WORKER_DIR=%s", root_worker_dir);
   i++;
 
   // TTYD_USER

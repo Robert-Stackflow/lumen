@@ -34,9 +34,12 @@ assert 'data-settings-tab="dependencies"' in page
 assert 'id="dependency-grid"' in page
 assert "renderDependencyChecks" in app
 assert 'id="setting-root-max-sessions"' in page
+assert 'id="setting-root-idle-timeout"' in page
 assert 'id="setting-default-root-session"' in page
 assert 'id="setting-root-require-verification"' in page
 assert "rootMaxSessions" in app
+assert "rootIdleSessionSeconds" in app
+assert "root 空闲会话将不会自动回收" in app
 assert "rootRequireVerification" in app
 assert 'data-value="fira"' in page
 assert 'data-value="sourcecode"' in page

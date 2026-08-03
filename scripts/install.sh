@@ -166,8 +166,8 @@ if [[ ! "$root_max_sessions" =~ ^[0-9]+$ ]] ||
   echo "Invalid root session count: $root_max_sessions" >&2
   exit 64
 fi
-if [[ ! "$root_idle_timeout" =~ ^[0-9]+$ ]] ||
-  ((root_idle_timeout < 300 || root_idle_timeout > 86400)); then
+if [[ ! "$root_idle_timeout" =~ ^[0-9]+$ ]] || ((root_idle_timeout > 86400)) ||
+  ((root_idle_timeout > 0 && root_idle_timeout < 300)); then
   echo "Invalid root idle timeout: $root_idle_timeout" >&2
   exit 64
 fi

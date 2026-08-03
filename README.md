@@ -239,7 +239,8 @@ sudo ./scripts/install.sh ubuntu terminal.example.com \
 以及是否要求 TOTP/通行密钥重新验证；默认仍创建普通用户会话并要求验证。
 
 监听地址、端口、最大连接数和认证配置路径保存在
-`/etc/lumen-terminal/runtime.env`，无需修改 systemd 单元。仓库中的
+`/etc/lumen-terminal/runtime.env`，无需修改 systemd 单元。root 空闲回收时间也可在
+网页的“设置 > 安全”中调整；设为 `0` 时不会自动回收无连接的 root 会话。仓库中的
 `deploy/README.md` 给出了回环代理、环境自有端口转发和可信内网直连三种
 部署；OpenResty/nginx 示例位于 `deploy/openresty-terminal.conf`。
 

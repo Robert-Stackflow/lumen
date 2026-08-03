@@ -114,7 +114,10 @@ sessions remain discoverable through tmux label `lumen-root`. The settings
 page controls whether creation and attach require fresh TOTP or WebAuthn
 verification. Verification is enabled by default. The initial limit and idle
 policy come from `LUMEN_ROOT_MAX_SESSIONS` and
-`LUMEN_ROOT_IDLE_SESSION_SECONDS` (2 sessions and 1800 seconds by default).
+`LUMEN_ROOT_IDLE_SESSION_SECONDS` (2 sessions and 1800 seconds by default). Set
+the idle value to `0` to disable automatic root-session reclamation. The same
+value can be changed from the Security settings page and is applied live to the
+root PTY broker and existing workers.
 Root socket access uses its own Unix group and the daemon additionally verifies
 the web process UID. Root create, attach, disconnect, and termination actions
 are written to the security audit log.
@@ -249,4 +252,17 @@ provided for controlled automation. The backup path is printed before removal.
 can persist a value from 1 through 8 and can independently control default-root
 creation and step-up verification. The root PTY supervisor has a fixed hard
 capacity of 8 so increasing the persisted web policy does not require a daemon
-restart. `LUMEN_ROOT_IDLE_SESSION_SECONDS` remains the service-side idle limit.
+restart. `LUMEN_ROOT_IDLE_SESSION_SECONDS` provides the initial idle limit. The
+Security settings page persists an override and applies it live to the root PTY
+broker and active workers; `0` disables automatic idle reclamation.
+
+Native worker sockets live under `/var/lib/lumen-pty/sessions` and
+`/var/lib/lumen-root-pty/sessions`. These state directories deliberately remain
+available across full service stop/start cycles; `/run` is used only for the
+replaceable broker sockets.
+
+The systemd units delegate the `pids` controller and place brokers in a
+`broker` subgroup. Every native worker receives its own `workers/<session-id>`
+sub-cgroup with a 256-task ceiling, while each PTY service has a 1024-task
+aggregate limit. Both services use `MemoryHigh=2G` and `MemoryMax=3G`, avoiding
+Codex thread-start failures without allowing one session to exhaust the host.

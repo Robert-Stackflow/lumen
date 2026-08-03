@@ -455,6 +455,21 @@
                     </div>
                   </div>
                 </div>
+                <div class="settings-row">
+                  <span><strong>root 空闲回收</strong><small>仅在没有连接且终端无活动时回收；设为永不则禁用自动回收</small></span>
+                  <div id="setting-root-idle-timeout" class="custom-select" data-value="1800">
+                    <button class="custom-select-trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+                      <span>30 分钟</span><svg viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3"/></svg>
+                    </button>
+                    <div class="custom-select-menu" role="listbox" hidden>
+                      <button type="button" role="option" data-value="0">永不自动回收</button>
+                      <button type="button" role="option" data-value="1800">30 分钟</button>
+                      <button type="button" role="option" data-value="3600">1 小时</button>
+                      <button type="button" role="option" data-value="21600">6 小时</button>
+                      <button type="button" role="option" data-value="86400">24 小时</button>
+                    </div>
+                  </div>
+                </div>
                 <label class="settings-row settings-toggle-row">
                   <span><strong>默认创建 root 会话</strong><small>首次打开、顶部“+”按钮和新建快捷键将创建 root 会话</small></span>
                   <input id="setting-default-root-session" type="checkbox">

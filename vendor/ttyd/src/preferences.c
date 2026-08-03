@@ -152,6 +152,7 @@ static json_object *normalize_preferences(const char *json) {
                add_boolean(source, target, "inheritWorkingDirectory") &&
                add_boolean(source, target, "persistTerminalState") &&
                add_integer(source, target, "rootMaxSessions", 1, 8) &&
+               add_integer(source, target, "rootIdleSessionSeconds", 0, 86400) &&
                add_boolean(source, target, "defaultRootSession") &&
                add_boolean(source, target, "rootRequireVerification") &&
                add_session_notes(source, target) &&
@@ -179,9 +180,12 @@ static json_object *normalize_preferences(const char *json) {
 }
 
 void lumen_auth_privileged_preferences(struct lumen_auth *auth, unsigned int default_max_sessions,
-                                        unsigned int *max_sessions, bool *require_verification) {
+                                        unsigned int default_idle_seconds,
+                                        unsigned int *max_sessions, unsigned int *idle_seconds,
+                                        bool *require_verification) {
   unsigned int effective_max = default_max_sessions >= 1 && default_max_sessions <= 8
                                    ? default_max_sessions : 2;
+  unsigned int effective_idle = default_idle_seconds <= 86400 ? default_idle_seconds : 1800;
   bool effective_verification = true;
   char *raw = lumen_auth_preferences_get(auth, NULL);
   json_object *preferences = raw ? json_tokener_parse(raw) : NULL;
@@ -193,12 +197,18 @@ void lumen_auth_privileged_preferences(struct lumen_auth *auth, unsigned int def
       int configured = json_object_get_int(value);
       if (configured >= 1 && configured <= 8) effective_max = (unsigned int)configured;
     }
+    if (json_object_object_get_ex(preferences, "rootIdleSessionSeconds", &value) &&
+        json_object_is_type(value, json_type_int)) {
+      int configured = json_object_get_int(value);
+      if (configured >= 0 && configured <= 86400) effective_idle = (unsigned int)configured;
+    }
     if (json_object_object_get_ex(preferences, "rootRequireVerification", &value) &&
         json_object_is_type(value, json_type_boolean))
       effective_verification = json_object_get_boolean(value);
   }
   if (preferences) json_object_put(preferences);
   if (max_sessions) *max_sessions = effective_max;
+  if (idle_seconds) *idle_seconds = effective_idle;
   if (require_verification) *require_verification = effective_verification;
 }
 

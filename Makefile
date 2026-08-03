@@ -57,6 +57,7 @@ check: build
 	bash tests/supervisor.sh
 	bash tests/worker_migration.sh
 	bash tests/hybrid_migration.sh
+	bash tests/root_idle_policy.sh
 	bash tests/auth_sessions.sh
 	bash tests/deployment_contract.sh
 
